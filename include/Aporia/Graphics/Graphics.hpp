@@ -93,15 +93,41 @@ struct CameraState {
     double position[3] = {0.0, 0.0, 0.0};
 };
 
+// Static scene environment submitted once per frame next to the camera:
+// sun state for the shadow pass and the reflection plane.
+struct EnvironmentState {
+    float sunDirection[3] = {0.35f, -0.5f, 0.8f}; // points toward the light
+    float sunIntensity = 1.0f;
+    float mirrorZ = 0.0f; // planar reflection plane height (m); mirrors reflect across z=mirrorZ
+};
+
 // One drawable object for a frame.
 struct RenderItem {
     std::uint64_t meshId = 0;
     float modelMatrix[16] = {};
 };
 
+// Abstract quality preset. One knob scales the whole picture: shadows, HDR,
+// reflections and texture sharpness move together.
+//   Low    - basic lighting, hard 512px shadows, no HDR/reflections,
+//            textures auto-compressed to half size.
+//   Medium - HDR target with ACES tonemap, soft 3x3 PCF shadows (1024px),
+//            half-resolution planar reflections, textures at 3/4 size.
+//   High   - max quality 5x5 PCF shadows (2048px), full-resolution
+//            reflections, native textures without any reduction.
+enum class GraphicsQuality : std::uint8_t {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+};
+
 struct GraphicsConfig {
     bool headless = true;
     bool enableValidation = false;
+    GraphicsQuality quality = GraphicsQuality::Medium;
+    float sunDirection[3] = {0.35f, -0.5f, 0.8f}; // normalized on use; points toward the light
+    float shadowExtent = 30.0f;                   // sun ortho half-extent around the camera (m)
+    float mirrorZ = 0.0f;                         // planar reflection plane height (m)
 };
 
 struct GraphicsStats {
@@ -121,6 +147,13 @@ struct GraphicsStats {
     bool validationEnabled = false;
     std::uint32_t validationMessageCount = 0;
     std::string deviceName;
+    // Quality preset effects (also reported by the optimization test).
+    std::uint32_t quality = 1;                 // GraphicsQuality value
+    bool hdrEnabled = false;                   // HDR target + ACES tonemap active
+    bool reflectionsEnabled = false;           // planar reflection pass active
+    std::uint32_t shadowMapSize = 0;           // sun shadow map edge (px)
+    std::uint32_t textureScalePercent = 100;   // texture auto-downscale (100 = native)
+    double avgFrameMs = 0.0;                   // rolling CPU frame time average
 };
 
 class APORIA_API Graphics {
@@ -138,12 +171,18 @@ public:
         const GraphicsConfig& config = {});
     void shutdown() noexcept;
 
+    // Re-applies the quality preset (recreates quality targets in place).
+    bool setQuality(GraphicsQuality quality);
+
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] bool renderFrame() noexcept;
     [[nodiscard]] bool renderHeadlessFrame() noexcept;
 
     // Draws the given items with the given camera into the current target.
     bool render(const CameraState& camera, const std::vector<RenderItem>& items);
+
+    // Same as render() with scene environment (sun, mirror plane).
+    bool render(const CameraState& camera, const EnvironmentState& environment, const std::vector<RenderItem>& items);
 
     // Copies the last rendered headless color target into host memory (RGBA8,
     // renderWidth * renderHeight * 4 bytes). Native targets are not readable.

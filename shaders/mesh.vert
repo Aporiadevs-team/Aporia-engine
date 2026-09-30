@@ -11,10 +11,24 @@ layout(location = 2) in vec2 inUv;
 
 layout(location = 0) out vec3 fragNormal;
 layout(location = 1) out vec2 fragUv;
+layout(location = 2) out vec3 fragWorldPosition;
+layout(location = 3) out vec4 fragShadowPosition;
+layout(location = 4) out vec4 fragClipPosition;
+
+layout(set = 0, binding = 3) uniform SceneUniforms {
+    mat4 sunViewProj;
+    vec4 sunDirection;
+    vec4 cameraPosition;
+    vec4 shadingParams;
+    vec4 screenParams;
+} scene;
 
 void main() {
     vec4 worldPosition = pc.model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPosition;
     fragNormal = mat3(pc.model) * inNormal;
     fragUv = inUv;
+    fragWorldPosition = worldPosition.xyz;
+    fragShadowPosition = scene.sunViewProj * worldPosition;
+    fragClipPosition = gl_Position;
 }

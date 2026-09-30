@@ -1,11 +1,3 @@
-#include "Aporia/Graphics/Graphics.hpp"
-#include "Aporia/Graphics/MeshPrimitives.hpp"
-
-#if defined(_WIN32) && !defined(VK_USE_PLATFORM_WIN32_KHR)
-#define VK_USE_PLATFORM_WIN32_KHR
-#endif
-#include <vulkan/vulkan.h>
-
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -13,8 +5,16 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #endif
+
+#include "Aporia/Graphics/Graphics.hpp"
+#include "Aporia/Graphics/MeshPrimitives.hpp"
+#include "Aporia/Math/Matrix4.hpp"
+
+#if defined(_WIN32) && !defined(VK_USE_PLATFORM_WIN32_KHR)
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
+#include <vulkan/vulkan.h>
 
 #include <algorithm>
 #include <array>
@@ -297,6 +297,52 @@ bool textureFormatInfo(
     return false;
 }
 
+// Quality preset parameter table: one place scales the whole picture.
+struct QualityParameters {
+    std::uint32_t shadowMapSize;
+    int shadowTaps;          // specialization constant: 1, 9, 25
+    bool hdr;
+    bool reflections;
+    float reflectionScale;   // reflection target relative to main target
+    float shadowStrength;    // ambient floor inside shadows
+    std::uint32_t textureScalePercent;
+};
+
+QualityParameters qualityParameters(Aporia::GraphicsQuality quality) noexcept {
+    switch (quality) {
+    case Aporia::GraphicsQuality::Low:
+        return {512, 1, false, false, 0.0f, 0.55f, 50};
+    case Aporia::GraphicsQuality::Medium:
+        return {1024, 9, true, true, 0.5f, 0.35f, 75};
+    case Aporia::GraphicsQuality::High:
+    default:
+        return {2048, 25, true, true, 1.0f, 0.25f, 100};
+    }
+}
+
+VkFormat chooseHdrFormat(VkPhysicalDevice physicalDevice) {
+    constexpr std::array<VkFormat, 2> candidates{
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+    };
+    for (const VkFormat candidate : candidates) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, candidate, &properties);
+        if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0 &&
+            (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0) {
+            return candidate;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+// Mirrors a world Z-up point across the plane z = mirrorZ.
+void reflectPoint(double mirrorZ, double& x, double& y, double& z) noexcept {
+    x = x;
+    y = y;
+    z = 2.0 * mirrorZ - z;
+}
+
 }
 
 namespace Aporia {
@@ -360,8 +406,51 @@ struct Graphics::Impl {
     // Mesh pipeline: vertex data in buffers, camera in push constants.
     VkPipelineLayout meshPipelineLayout = VK_NULL_HANDLE;
     VkPipeline meshPipeline = VK_NULL_HANDLE;
+    // Same mesh pipeline but created against the HDR render pass (Medium/High
+    // presets render the main pass into the HDR target).
+    VkPipeline hdrMeshPipeline = VK_NULL_HANDLE;
+    VkRenderPass hdrRenderPass = VK_NULL_HANDLE;
     VkShaderModule meshVertexShader = VK_NULL_HANDLE;
     VkShaderModule meshFragmentShader = VK_NULL_HANDLE;
+
+    // Quality pass resources. One scene uniform buffer + descriptor set per
+    // frame-in-flight slot; shadow/reflection maps are stable shared images.
+    static constexpr std::uint32_t sceneUniformCount = 2;
+    VkBuffer sceneUniformBuffers[sceneUniformCount] = {};
+    VkDeviceMemory sceneUniformMemory[sceneUniformCount] = {};
+    VkDescriptorPool sceneDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSetLayout sceneDescriptorLayout = VK_NULL_HANDLE;
+    VkDescriptorSet sceneDescriptorSets[sceneUniformCount] = {};
+    VkPipeline shadowPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
+    VkShaderModule shadowVertexShader = VK_NULL_HANDLE;
+    VkShaderModule shadowFragmentShader = VK_NULL_HANDLE;
+    VkImage shadowImage = VK_NULL_HANDLE;
+    VkDeviceMemory shadowMemory = VK_NULL_HANDLE;
+    VkImageView shadowView = VK_NULL_HANDLE;
+    VkSampler shadowSampler = VK_NULL_HANDLE;
+    VkSampler reflectSampler = VK_NULL_HANDLE;
+    VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
+    VkFramebuffer shadowFramebuffer = VK_NULL_HANDLE;
+    // Reflection target needs its own render pass: the shared main pass ends
+    // in PRESENT_SRC_KHR in windowed mode, which cannot be sampled.
+    VkRenderPass reflectRenderPass = VK_NULL_HANDLE;
+    std::uint32_t shadowMapSize = 0;
+    VkPipeline tonemapPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout tonemapPipelineLayout = VK_NULL_HANDLE;
+    VkShaderModule tonemapVertexShader = VK_NULL_HANDLE;
+    VkShaderModule tonemapFragmentShader = VK_NULL_HANDLE;
+    VkDescriptorPool tonemapDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSetLayout tonemapDescriptorLayout = VK_NULL_HANDLE;
+    VkDescriptorSet tonemapDescriptorSet = VK_NULL_HANDLE;
+    bool hdrEnabled = false;
+    bool reflectionsEnabled = false;
+    int shadowTaps = 9;
+    float reflectionScale = 0.0f;
+    float shadowStrength = 0.35f;
+    std::uint32_t textureScalePercent = 100;
+    double avgFrameMs = 0.0;
+    Aporia::EnvironmentState environment{};
 
     VkImage depthImage = VK_NULL_HANDLE;
     VkDeviceMemory depthMemory = VK_NULL_HANDLE;
@@ -387,7 +476,7 @@ struct Graphics::Impl {
         float model[16];
     };
 
-    // Column-major 4x4 multiply: out = a * b.
+    // Column-major 4x4 multiply: out = a * b (a, b, out are float[16]).
     static void multiplyMat4(const float* a, const float* b, float* out) noexcept {
         for (int column = 0; column < 4; ++column) {
             for (int row = 0; row < 4; ++row) {
@@ -404,8 +493,36 @@ struct Graphics::Impl {
     std::uint64_t nextMeshId = 1;
     CameraState pendingCamera{};
     float pendingViewProj[16]{};
+    float pendingProjection[16]{};
     std::vector<RenderItem> pendingItems;
     bool drawDebugTriangle = true;
+
+    // Camera mirrored across z = environment.mirrorZ for the planar
+    // reflection pass (Z-up world). Forward direction comes from the view
+    // matrix third column.
+    Mat4 reflectViewMatrix() const noexcept {
+        const double mirrorZ = static_cast<double>(environment.mirrorZ);
+        const auto reflect = [mirrorZ](double z) { return 2.0 * mirrorZ - z; };
+        const float forwardX = -pendingViewProj[8];
+        const float forwardY = -pendingViewProj[9];
+        const float forwardZ = -pendingViewProj[10];
+        const Vec3 reflectedEye(
+            pendingCamera.position[0],
+            pendingCamera.position[1],
+            reflect(static_cast<double>(pendingCamera.position[2])));
+        const Vec3 target(
+            pendingCamera.position[0] + forwardX * 100.0,
+            pendingCamera.position[1] + forwardY * 100.0,
+            reflect(static_cast<double>(pendingCamera.position[2]) + forwardZ * 100.0));
+        const Vec3 up(0.0, 0.0, 1.0);
+        Mat4 view = Mat4::lookAt(reflectedEye, target, up);
+        // Mirrored view flips handedness; negate the x basis column.
+        view.m[0][0] = -view.m[0][0];
+        view.m[1][0] = -view.m[1][0];
+        view.m[2][0] = -view.m[2][0];
+        view.m[3][0] = -view.m[3][0];
+        return view;
+    }
 
     struct TextureResource {
         VkImage image = VK_NULL_HANDLE;
@@ -423,6 +540,43 @@ struct Graphics::Impl {
     TextureHandle boundTexture;
     std::uint64_t nextTextureId = 1;
     std::uint64_t textureUploadCount = 0;
+
+    // HDR scene target: all meshes render here; tonemap pass copies it to the
+    // final target.    // final color target. At Low quality the mesh pass renders straight to the
+    // final target and this image stays unused.
+    VkImage hdrImage = VK_NULL_HANDLE;
+    VkDeviceMemory hdrMemory = VK_NULL_HANDLE;
+    VkImageView hdrView = VK_NULL_HANDLE;
+    VkSampler hdrSampler = VK_NULL_HANDLE;
+    VkFramebuffer hdrFramebuffer = VK_NULL_HANDLE;
+    VkImage hdrDepthImage = VK_NULL_HANDLE;
+    VkDeviceMemory hdrDepthMemory = VK_NULL_HANDLE;
+    VkImageView hdrDepthView = VK_NULL_HANDLE;
+    std::uint32_t hdrWidth = 0;
+    std::uint32_t hdrHeight = 0;
+    VkFormat hdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+    // Planar reflection target: mirrored scene rendered from the reflected
+    // camera. Sized reflectionScale relative to the main target.
+    VkImage reflectImage = VK_NULL_HANDLE;
+    VkDeviceMemory reflectMemory = VK_NULL_HANDLE;
+    VkImageView reflectView = VK_NULL_HANDLE;
+    VkFramebuffer reflectFramebuffer = VK_NULL_HANDLE;
+    VkImage reflectDepthImage = VK_NULL_HANDLE;
+    VkDeviceMemory reflectDepthMemory = VK_NULL_HANDLE;
+    VkImageView reflectDepthView = VK_NULL_HANDLE;
+    std::uint32_t reflectWidth = 0;
+    std::uint32_t reflectHeight = 0;
+
+    struct SceneUniforms {
+        float sunViewProj[16];
+        float sunDirection[4];
+        float cameraPosition[4];
+        float shadingParams[4];
+        float screenParams[4];
+    };
+    static_assert(sizeof(SceneUniforms) == 128, "SceneUniforms must stay one 128-byte block");
+
     VkPhysicalDeviceMemoryProperties memoryProperties{};
     VkFormat colorFormat = VK_FORMAT_UNDEFINED;
     std::uint64_t frameCount = 0;
@@ -437,6 +591,21 @@ struct Graphics::Impl {
         engineLog("[error] %s", message.c_str());
         lastError = std::move(message);
     }
+
+    void applyQualityPreset(Aporia::GraphicsQuality quality) noexcept {
+        const QualityParameters parameters = qualityParameters(quality);
+        shadowMapSize = parameters.shadowMapSize;
+        shadowTaps = parameters.shadowTaps;
+        hdrEnabled = parameters.hdr;
+        reflectionsEnabled = parameters.reflections;
+        reflectionScale = parameters.reflectionScale;
+        shadowStrength = parameters.shadowStrength;
+        textureScalePercent = parameters.textureScalePercent;
+        activeQuality = quality;
+    }
+
+    Aporia::GraphicsQuality activeQuality = Aporia::GraphicsQuality::Medium;
+    float shadowExtent = 30.0f;
 
     void destroyTextureResource(TextureResource& texture) noexcept {
         if (device != VK_NULL_HANDLE) {
@@ -752,6 +921,598 @@ struct Graphics::Impl {
         return true;
     }
 
+    // ---------- quality pass resources ----------
+
+    void destroyQualityTargets() noexcept {
+        if (device != VK_NULL_HANDLE) {
+            if (hdrFramebuffer != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device, hdrFramebuffer, nullptr);
+            }
+            if (hdrSampler != VK_NULL_HANDLE) {
+                vkDestroySampler(device, hdrSampler, nullptr);
+            }
+            if (hdrDepthView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, hdrDepthView, nullptr);
+            }
+            if (hdrDepthImage != VK_NULL_HANDLE) {
+                vkDestroyImage(device, hdrDepthImage, nullptr);
+            }
+            if (hdrDepthMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, hdrDepthMemory, nullptr);
+            }
+            if (hdrView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, hdrView, nullptr);
+            }
+            if (hdrImage != VK_NULL_HANDLE) {
+                vkDestroyImage(device, hdrImage, nullptr);
+            }
+            if (hdrMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, hdrMemory, nullptr);
+            }
+            if (reflectFramebuffer != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device, reflectFramebuffer, nullptr);
+            }
+            if (reflectDepthView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, reflectDepthView, nullptr);
+            }
+            if (reflectDepthImage != VK_NULL_HANDLE) {
+                vkDestroyImage(device, reflectDepthImage, nullptr);
+            }
+            if (reflectDepthMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, reflectDepthMemory, nullptr);
+            }
+            if (reflectView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, reflectView, nullptr);
+            }
+            if (reflectImage != VK_NULL_HANDLE) {
+                vkDestroyImage(device, reflectImage, nullptr);
+            }
+            if (reflectMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, reflectMemory, nullptr);
+            }
+            if (shadowFramebuffer != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device, shadowFramebuffer, nullptr);
+            }
+            if (shadowRenderPass != VK_NULL_HANDLE) {
+                vkDestroyRenderPass(device, shadowRenderPass, nullptr);
+            }
+            if (reflectRenderPass != VK_NULL_HANDLE) {
+                vkDestroyRenderPass(device, reflectRenderPass, nullptr);
+            }
+            if (shadowSampler != VK_NULL_HANDLE) {
+                vkDestroySampler(device, shadowSampler, nullptr);
+            }
+            if (reflectSampler != VK_NULL_HANDLE) {
+                vkDestroySampler(device, reflectSampler, nullptr);
+            }
+            if (shadowView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, shadowView, nullptr);
+            }
+            if (shadowImage != VK_NULL_HANDLE) {
+                vkDestroyImage(device, shadowImage, nullptr);
+            }
+            if (shadowMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, shadowMemory, nullptr);
+            }
+            for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
+                if (sceneUniformBuffers[slot] != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(device, sceneUniformBuffers[slot], nullptr);
+                    sceneUniformBuffers[slot] = VK_NULL_HANDLE;
+                }
+                if (sceneUniformMemory[slot] != VK_NULL_HANDLE) {
+                    vkFreeMemory(device, sceneUniformMemory[slot], nullptr);
+                    sceneUniformMemory[slot] = VK_NULL_HANDLE;
+                }
+            }
+            if (sceneDescriptorPool != VK_NULL_HANDLE) {
+                // Pool is rebuilt each time; the layout outlives it because
+                // mesh/shadow pipeline layouts reference it.
+                vkDestroyDescriptorPool(device, sceneDescriptorPool, nullptr);
+            }
+            if (tonemapDescriptorPool != VK_NULL_HANDLE) {
+                // Pool is owned by initialize/destroy; rebuild only reclaims
+                // the tonemap descriptor set allocated from it.
+                vkResetDescriptorPool(device, tonemapDescriptorPool, 0);
+            }
+        }
+        hdrImage = VK_NULL_HANDLE;
+        hdrMemory = VK_NULL_HANDLE;
+        hdrView = VK_NULL_HANDLE;
+        hdrSampler = VK_NULL_HANDLE;
+        hdrFramebuffer = VK_NULL_HANDLE;
+        hdrDepthImage = VK_NULL_HANDLE;
+        hdrDepthMemory = VK_NULL_HANDLE;
+        hdrDepthView = VK_NULL_HANDLE;
+        hdrWidth = 0;
+        hdrHeight = 0;
+        reflectImage = VK_NULL_HANDLE;
+        reflectMemory = VK_NULL_HANDLE;
+        reflectView = VK_NULL_HANDLE;
+        reflectFramebuffer = VK_NULL_HANDLE;
+        reflectDepthImage = VK_NULL_HANDLE;
+        reflectDepthMemory = VK_NULL_HANDLE;
+        reflectDepthView = VK_NULL_HANDLE;
+        reflectWidth = 0;
+        reflectHeight = 0;
+        shadowImage = VK_NULL_HANDLE;
+        shadowMemory = VK_NULL_HANDLE;
+        shadowView = VK_NULL_HANDLE;
+        shadowSampler = VK_NULL_HANDLE;
+        reflectSampler = VK_NULL_HANDLE;
+        shadowRenderPass = VK_NULL_HANDLE;
+        shadowFramebuffer = VK_NULL_HANDLE;
+        reflectRenderPass = VK_NULL_HANDLE;
+        // shadowMapSize is preset configuration, not a GPU target; it must
+        // survive rebuilds so createShadowResources() sees the right size.
+        sceneDescriptorPool = VK_NULL_HANDLE;
+        for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
+            sceneDescriptorSets[slot] = VK_NULL_HANDLE;
+        }
+        tonemapDescriptorSet = VK_NULL_HANDLE;
+    }
+
+    // Offscreen color target with its own depth attachment, compatible with
+    // the main depth-bearing render pass.
+    bool createColorTarget(
+        VkFormat format,
+        VkImageUsageFlags extraUsage,
+        std::uint32_t width,
+        std::uint32_t height,
+        VkRenderPass compatibleRenderPass,
+        VkImageView& outView,
+        VkFramebuffer& outFramebuffer,
+        VkImage& outImage,
+        VkDeviceMemory& outMemory,
+        VkImageView& outDepthView,
+        VkImage& outDepthImage,
+        VkDeviceMemory& outDepthMemory) {
+        outImage = VK_NULL_HANDLE;
+        outMemory = VK_NULL_HANDLE;
+        outView = VK_NULL_HANDLE;
+        outFramebuffer = VK_NULL_HANDLE;
+        outDepthImage = VK_NULL_HANDLE;
+        outDepthMemory = VK_NULL_HANDLE;
+        outDepthView = VK_NULL_HANDLE;
+
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.format = format;
+        imageInfo.extent = {width, height, 1};
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | extraUsage;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(device, &imageInfo, nullptr, &outImage) != VK_SUCCESS) {
+            setError("vkCreateImage(quality target) failed");
+            return false;
+        }
+
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(device, outImage, &requirements);
+        std::uint32_t memoryType = 0;
+        if (!findMemoryType(memoryProperties, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memoryType)) {
+            setError("No device-local memory for quality target");
+            return false;
+        }
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = requirements.size;
+        allocateInfo.memoryTypeIndex = memoryType;
+        if (vkAllocateMemory(device, &allocateInfo, nullptr, &outMemory) != VK_SUCCESS) {
+            setError("vkAllocateMemory(quality target) failed");
+            return false;
+        }
+        if (vkBindImageMemory(device, outImage, outMemory, 0) != VK_SUCCESS) {
+            setError("vkBindImageMemory(quality target) failed");
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = outImage;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = format;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device, &viewInfo, nullptr, &outView) != VK_SUCCESS) {
+            setError("vkCreateImageView(quality target) failed");
+            return false;
+        }
+
+        if (compatibleRenderPass != VK_NULL_HANDLE) {
+            if (!createDepthImage({width, height}, outDepthImage, outDepthMemory, outDepthView)) {
+                return false;
+            }
+            std::array<VkImageView, 2> attachments{outView, outDepthView};
+            VkFramebufferCreateInfo framebufferInfo{};
+            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebufferInfo.renderPass = compatibleRenderPass;
+            framebufferInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
+            framebufferInfo.pAttachments = attachments.data();
+            framebufferInfo.width = width;
+            framebufferInfo.height = height;
+            framebufferInfo.layers = 1;
+            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &outFramebuffer) != VK_SUCCESS) {
+                setError("vkCreateFramebuffer(quality target) failed");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool createShadowRenderPass() {
+        if (shadowRenderPass != VK_NULL_HANDLE) {
+            return true;
+        }
+        if (depthFormat == VK_FORMAT_UNDEFINED) {
+            depthFormat = chooseDepthFormat();
+            if (depthFormat == VK_FORMAT_UNDEFINED) {
+                setError("No supported depth attachment format");
+                return false;
+            }
+        }
+
+        VkAttachmentDescription depthAttachment{};
+        depthAttachment.format = depthFormat;
+        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Ends sampled: the mesh fragment shader reads it as DEPTH_READ_ONLY.
+        // Each pass re-renders the map, so the next pass's UNDEFINED
+        // initialLayout discards without needing a back-transition.
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+
+        VkAttachmentReference depthReference{};
+        depthReference.attachment = 0;
+        depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.pDepthStencilAttachment = &depthReference;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &depthAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &shadowRenderPass) != VK_SUCCESS) {
+            setError("vkCreateRenderPass(shadow) failed");
+            return false;
+        }
+        return true;
+    }
+
+    // Reflection target render pass: identical to the main one but always
+    // ends in COLOR_ATTACHMENT_OPTIMAL so the image can be sampled later.
+    bool createReflectRenderPass() {
+        if (reflectRenderPass != VK_NULL_HANDLE) {
+            return true;
+        }
+        if (depthFormat == VK_FORMAT_UNDEFINED) {
+            depthFormat = chooseDepthFormat();
+            if (depthFormat == VK_FORMAT_UNDEFINED) {
+                setError("No supported depth attachment format");
+                return false;
+            }
+        }
+
+        VkAttachmentDescription colorAttachment{};
+        colorAttachment.format = colorFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Ends sampled: the main pass samples the reflect target as a texture.
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkAttachmentDescription depthAttachment{};
+        depthAttachment.format = depthFormat;
+        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        std::array<VkAttachmentDescription, 2> attachments{colorAttachment, depthAttachment};
+
+        VkAttachmentReference colorReference{};
+        colorReference.attachment = 0;
+        colorReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthReference{};
+        depthReference.attachment = 1;
+        depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorReference;
+        subpass.pDepthStencilAttachment = &depthReference;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
+        renderPassInfo.pAttachments = attachments.data();
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &reflectRenderPass) != VK_SUCCESS) {
+            setError("vkCreateRenderPass(reflect) failed");
+            return false;
+        }
+        return true;
+    }
+
+    bool createShadowResources() {
+        if (!createShadowRenderPass()) {
+            return false;
+        }
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.format = depthFormat;
+        imageInfo.extent = {shadowMapSize, shadowMapSize, 1};
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(device, &imageInfo, nullptr, &shadowImage) != VK_SUCCESS) {
+            setError("vkCreateImage(shadow map) failed");
+            return false;
+        }
+
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(device, shadowImage, &requirements);
+        std::uint32_t memoryType = 0;
+        if (!findMemoryType(memoryProperties, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memoryType)) {
+            setError("No device-local memory for shadow map");
+            return false;
+        }
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = requirements.size;
+        allocateInfo.memoryTypeIndex = memoryType;
+        if (vkAllocateMemory(device, &allocateInfo, nullptr, &shadowMemory) != VK_SUCCESS) {
+            setError("vkAllocateMemory(shadow map) failed");
+            return false;
+        }
+        if (vkBindImageMemory(device, shadowImage, shadowMemory, 0) != VK_SUCCESS) {
+            setError("vkBindImageMemory(shadow map) failed");
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = shadowImage;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = depthFormat;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device, &viewInfo, nullptr, &shadowView) != VK_SUCCESS) {
+            setError("vkCreateImageView(shadow map) failed");
+            return false;
+        }
+
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.maxLod = 1.0f;
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &shadowSampler) != VK_SUCCESS) {
+            setError("vkCreateSampler(shadow) failed");
+            return false;
+        }
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &reflectSampler) != VK_SUCCESS) {
+            setError("vkCreateSampler(reflection) failed");
+            return false;
+        }
+
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = shadowRenderPass;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = &shadowView;
+        framebufferInfo.width = shadowMapSize;
+        framebufferInfo.height = shadowMapSize;
+        framebufferInfo.layers = 1;
+        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &shadowFramebuffer) != VK_SUCCESS) {
+            setError("vkCreateFramebuffer(shadow) failed");
+            return false;
+        }
+        return true;
+    }
+
+    bool createSceneDescriptorLayout() {
+        // Matches the shader declaration in mesh.frag/mesh.vert:
+        // 0 = albedo sampler, 1 = shadow map, 2 = reflection map,
+        // 3 = SceneUniforms UBO.
+        VkDescriptorSetLayoutBinding bindings[4]{};
+        bindings[0].binding = 0;
+        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1].binding = 1;
+        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[2].binding = 2;
+        bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[2].descriptorCount = 1;
+        bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[3].binding = 3;
+        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[3].descriptorCount = 1;
+        bindings[3].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 4;
+        layoutInfo.pBindings = bindings;
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &sceneDescriptorLayout) != VK_SUCCESS) {
+            setError("vkCreateDescriptorSetLayout(scene) failed");
+            return false;
+        }
+        return true;
+    }
+
+    bool createSceneUniforms() {
+        if (sceneDescriptorLayout == VK_NULL_HANDLE) {
+            if (!createSceneDescriptorLayout()) {
+                return false;
+            }
+        }
+        VkDescriptorPoolSize poolSizes[2]{};
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[0].descriptorCount = sceneUniformCount * 2;
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[1].descriptorCount = sceneUniformCount * 2;
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = sceneUniformCount;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = poolSizes;
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &sceneDescriptorPool) != VK_SUCCESS) {
+            setError("vkCreateDescriptorPool(scene) failed");
+            return false;
+        }
+
+        const VkDeviceSize uniformSize = sizeof(SceneUniforms);
+        for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = uniformSize;
+            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (vkCreateBuffer(device, &bufferInfo, nullptr, &sceneUniformBuffers[slot]) != VK_SUCCESS) {
+                setError("vkCreateBuffer(scene uniforms) failed");
+                return false;
+            }
+            VkMemoryRequirements requirements{};
+            vkGetBufferMemoryRequirements(device, sceneUniformBuffers[slot], &requirements);
+            std::uint32_t memoryType = 0;
+            if (!findMemoryType(
+                    memoryProperties,
+                    requirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    memoryType)) {
+                setError("No host-visible memory for scene uniforms");
+                return false;
+            }
+            VkMemoryAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocateInfo.allocationSize = requirements.size;
+            allocateInfo.memoryTypeIndex = memoryType;
+            if (vkAllocateMemory(device, &allocateInfo, nullptr, &sceneUniformMemory[slot]) != VK_SUCCESS) {
+                setError("vkAllocateMemory(scene uniforms) failed");
+                return false;
+            }
+            if (vkBindBufferMemory(device, sceneUniformBuffers[slot], sceneUniformMemory[slot], 0) != VK_SUCCESS) {
+                setError("vkBindBufferMemory(scene uniforms) failed");
+                return false;
+            }
+
+            VkDescriptorSetAllocateInfo allocateSetInfo{};
+            allocateSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateSetInfo.descriptorPool = sceneDescriptorPool;
+            allocateSetInfo.descriptorSetCount = 1;
+            allocateSetInfo.pSetLayouts = &sceneDescriptorLayout;
+            if (vkAllocateDescriptorSets(device, &allocateSetInfo, &sceneDescriptorSets[slot]) != VK_SUCCESS) {
+                setError("vkAllocateDescriptorSets(scene) failed");
+                return false;
+            }
+
+            VkDescriptorBufferInfo bufferDescriptor{};
+            bufferDescriptor.buffer = sceneUniformBuffers[slot];
+            bufferDescriptor.offset = 0;
+            bufferDescriptor.range = uniformSize;
+
+            const auto defaultIt = textures.find(defaultTexture.value());
+            const auto textureIt = textures.find(boundTexture.value());
+            const auto& albedoResource = textureIt != textures.end() ? textureIt->second : defaultIt->second;
+
+            VkDescriptorImageInfo albedoDescriptor{};
+            albedoDescriptor.sampler = albedoResource.sampler;
+            albedoDescriptor.imageView = albedoResource.view;
+            albedoDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkDescriptorImageInfo shadowDescriptor{};
+            shadowDescriptor.sampler = shadowSampler;
+            shadowDescriptor.imageView = shadowView;
+            shadowDescriptor.imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+            std::array<VkWriteDescriptorSet, 4> writes{};
+            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet = sceneDescriptorSets[slot];
+            writes[0].dstBinding = 0;
+            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[0].descriptorCount = 1;
+            writes[0].pImageInfo = &albedoDescriptor;
+            writes[1] = writes[0];
+            writes[1].dstBinding = 1;
+            writes[1].pImageInfo = &shadowDescriptor;
+            writes[2] = writes[0];
+            writes[2].dstBinding = 2;
+            // Reflection map descriptor is filled in after the reflect target
+            // exists (see rebuildQualityTargets); a null view is invalid, so
+            // reuse the albedo texture until then.
+            writes[2].pImageInfo = &albedoDescriptor;
+            writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[3].dstSet = sceneDescriptorSets[slot];
+            writes[3].dstBinding = 3;
+            writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[3].descriptorCount = 1;
+            writes[3].pBufferInfo = &bufferDescriptor;
+            vkUpdateDescriptorSets(device, 4, writes.data(), 0, nullptr);
+        }
+        return true;
+    }
+
+    void refreshSceneTextureBinding() {
+        if (sceneDescriptorPool == VK_NULL_HANDLE) {
+            return;
+        }
+        const auto textureIt = textures.find(boundTexture.value());
+        if (textureIt == textures.end() || textureIt->second.view == VK_NULL_HANDLE) {
+            return;
+        }
+        for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
+            if (sceneDescriptorSets[slot] == VK_NULL_HANDLE) {
+                continue;
+            }
+            VkDescriptorImageInfo albedoDescriptor{};
+            albedoDescriptor.sampler = textureIt->second.sampler;
+            albedoDescriptor.imageView = textureIt->second.view;
+            albedoDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = sceneDescriptorSets[slot];
+            write.dstBinding = 0;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.descriptorCount = 1;
+            write.pImageInfo = &albedoDescriptor;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+    }
+
     bool uploadTextureData(
         TextureResource& texture,
         const void* pixels,
@@ -944,6 +1705,48 @@ struct Graphics::Impl {
             setError("Texture dimensions or data size are invalid");
             return false;
         }
+
+        // Quality auto-compression: Low keeps every second texel, Medium 3 of
+        // 4, High keeps the source data untouched.
+        TextureDesc effective = description;
+        std::vector<std::uint8_t> downscaledPixels;
+        const std::uint32_t scale = textureScalePercent;
+        if (scale < 100 && (description.width > 4 || description.height > 4)) {
+            const std::uint32_t scaledWidth = std::max<std::uint32_t>(1, description.width * scale / 100);
+            const std::uint32_t scaledHeight = std::max<std::uint32_t>(1, description.height * scale / 100);
+            std::vector<std::uint8_t> boxFiltered(
+                static_cast<std::size_t>(scaledWidth) * scaledHeight * bytesPerPixel);
+            const auto* source = static_cast<const std::uint8_t*>(description.pixels);
+            for (std::uint32_t y = 0; y < scaledHeight; ++y) {
+                const std::uint32_t sourceY0 = static_cast<std::uint32_t>(
+                    static_cast<std::uint64_t>(y) * description.height / scaledHeight);
+                const std::uint32_t sourceY1 = std::min(description.height - 1, static_cast<std::uint32_t>(
+                    static_cast<std::uint64_t>(y + 1) * description.height / scaledHeight));
+                for (std::uint32_t x = 0; x < scaledWidth; ++x) {
+                    const std::uint32_t sourceX0 = static_cast<std::uint32_t>(
+                        static_cast<std::uint64_t>(x) * description.width / scaledWidth);
+                    const std::uint32_t sourceX1 = std::min(description.width - 1, static_cast<std::uint32_t>(
+                        static_cast<std::uint64_t>(x + 1) * description.width / scaledWidth));
+                    for (std::uint32_t component = 0; component < bytesPerPixel; ++component) {
+                        std::uint32_t sum = 0;
+                        std::uint32_t count = 0;
+                        for (std::uint32_t sy = sourceY0; sy <= sourceY1; ++sy) {
+                            for (std::uint32_t sx = sourceX0; sx <= sourceX1; ++sx) {
+                                sum += source[(static_cast<std::size_t>(sy) * description.width + sx) * bytesPerPixel + component];
+                                ++count;
+                            }
+                        }
+                        boxFiltered[(static_cast<std::size_t>(y) * scaledWidth + x) * bytesPerPixel + component] =
+                            static_cast<std::uint8_t>(sum / count);
+                    }
+                }
+            }
+            downscaledPixels = std::move(boxFiltered);
+            effective.width = scaledWidth;
+            effective.height = scaledHeight;
+            effective.pixels = downscaledPixels.data();
+            effective.dataSize = downscaledPixels.size();
+        }
         VkFormatProperties formatProperties{};
         vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &formatProperties);
         if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0 ||
@@ -968,7 +1771,7 @@ struct Graphics::Impl {
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
         imageInfo.format = format;
-        imageInfo.extent = {description.width, description.height, 1};
+        imageInfo.extent = {effective.width, effective.height, 1};
         imageInfo.mipLevels = 1;
         imageInfo.arrayLayers = 1;
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1029,10 +1832,10 @@ struct Graphics::Impl {
         }
 
         texture.format = format;
-        texture.width = description.width;
-        texture.height = description.height;
-        texture.dataSize = description.dataSize;
-        if (!uploadTextureData(texture, description.pixels, description.dataSize, VK_IMAGE_LAYOUT_UNDEFINED)) {
+        texture.width = effective.width;
+        texture.height = effective.height;
+        texture.dataSize = effective.dataSize;
+        if (!uploadTextureData(texture, effective.pixels, effective.dataSize, VK_IMAGE_LAYOUT_UNDEFINED)) {
             return false;
         }
         cleanup.committed = true;
@@ -1165,6 +1968,204 @@ struct Graphics::Impl {
         write.pImageInfo = &imageInfo;
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
         boundTexture = handle;
+        refreshSceneTextureBinding();
+        return true;
+    }
+
+    // Sun view-projection: ortho box around a point near the camera, sized to
+    // shadowExtent, oriented along the sun direction (Z-up world).
+    void buildSunMatrix(float outMatrix[16]) const noexcept {
+        float directionX = environment.sunDirection[0];
+        float directionY = environment.sunDirection[1];
+        float directionZ = environment.sunDirection[2];
+        const float length = std::sqrt(directionX * directionX + directionY * directionY + directionZ * directionZ);
+        if (length <= 1.0e-6f) {
+            directionX = 0.35f;
+            directionY = -0.5f;
+            directionZ = 0.8f;
+        } else {
+            directionX /= length;
+            directionY /= length;
+            directionZ /= length;
+        }
+        if (std::abs(directionZ) > 0.999f) {
+            directionZ = directionZ > 0.0f ? 0.999f : -0.999f;
+        }
+
+        const Vec3 sunDirection(directionX, directionY, directionZ);
+        const Vec3 cameraPosition(
+            pendingCamera.position[0],
+            pendingCamera.position[1],
+            pendingCamera.position[2]);
+        const Vec3 center = cameraPosition + sunDirection * 20.0;
+        const Vec3 eye = center + sunDirection * 60.0;
+        const Vec3 up = std::abs(directionZ) < 0.9f ? Vec3(0.0, 0.0, 1.0) : Vec3(1.0, 0.0, 0.0);
+        const Mat4 view = Mat4::lookAt(eye, center, up);
+        const double extent = std::max(1.0, static_cast<double>(shadowExtent));
+        const Mat4 projection = Mat4::orthographicVulkan(extent, extent, 0.1, 200.0);
+        const Mat4 sunViewProj = projection * view;
+        std::memcpy(outMatrix, &sunViewProj, sizeof(sunViewProj));
+    }
+
+    void writeSceneUniforms(std::uint32_t slot, const float sunMatrix[16]) {
+        if (sceneUniformMemory[slot] == VK_NULL_HANDLE) {
+            return;
+        }
+        void* mapped = nullptr;
+        if (vkMapMemory(device, sceneUniformMemory[slot], 0, sizeof(SceneUniforms), 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
+            return;
+        }
+        SceneUniforms uniforms{};
+        std::memcpy(uniforms.sunViewProj, sunMatrix, sizeof(uniforms.sunViewProj));
+        uniforms.sunDirection[0] = environment.sunDirection[0];
+        uniforms.sunDirection[1] = environment.sunDirection[1];
+        uniforms.sunDirection[2] = environment.sunDirection[2];
+        uniforms.sunDirection[3] = environment.sunIntensity;
+        uniforms.cameraPosition[0] = static_cast<float>(pendingCamera.position[0]);
+        uniforms.cameraPosition[1] = static_cast<float>(pendingCamera.position[1]);
+        uniforms.cameraPosition[2] = static_cast<float>(pendingCamera.position[2]);
+        uniforms.shadingParams[0] = 0.32f; // ambient
+        uniforms.shadingParams[1] = shadowStrength;
+        uniforms.shadingParams[2] = environment.mirrorZ;
+        uniforms.shadingParams[3] = shadowMapSize > 0 ? 1.0f / static_cast<float>(shadowMapSize) : 0.0f;
+        uniforms.screenParams[0] = static_cast<float>(hdrEnabled ? hdrWidth : (headless ? renderWidth : swapchainExtent.width));
+        uniforms.screenParams[1] = static_cast<float>(hdrEnabled ? hdrHeight : (headless ? renderHeight : swapchainExtent.height));
+        std::memcpy(mapped, &uniforms, sizeof(uniforms));
+        vkUnmapMemory(device, sceneUniformMemory[slot]);
+    }
+
+    // (Re)creates HDR/shadow/reflection targets for the current preset and
+    // main target size. Main target size comes from the headless constants or
+    // the swapchain extent.
+    bool rebuildQualityTargets() {
+        const std::uint32_t mainWidth = headless ? renderWidth : swapchainExtent.width;
+        const std::uint32_t mainHeight = headless ? renderHeight : swapchainExtent.height;
+        if (mainWidth == 0 || mainHeight == 0) {
+            setError("Quality targets require a valid main target size");
+            return false;
+        }
+
+        vkDeviceWaitIdle(device);
+        destroyQualityTargets();
+
+        if (hdrFormat == VK_FORMAT_UNDEFINED) {
+            hdrFormat = chooseHdrFormat(physicalDevice);
+            if (hdrFormat == VK_FORMAT_UNDEFINED) {
+                setError("No supported HDR color format");
+                return false;
+            }
+        }
+
+        if (hdrEnabled) {
+            if (!createColorTarget(
+                    hdrFormat,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    mainWidth,
+                    mainHeight,
+                    hdrRenderPass != VK_NULL_HANDLE ? hdrRenderPass : renderPass,
+                    hdrView,
+                    hdrFramebuffer,
+                    hdrImage,
+                    hdrMemory,
+                    hdrDepthView,
+                    hdrDepthImage,
+                    hdrDepthMemory)) {
+                return false;
+            }
+            hdrWidth = mainWidth;
+            hdrHeight = mainHeight;
+
+            VkSamplerCreateInfo samplerInfo{};
+            samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerInfo.magFilter = VK_FILTER_LINEAR;
+            samplerInfo.minFilter = VK_FILTER_LINEAR;
+            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.maxLod = 1.0f;
+            if (vkCreateSampler(device, &samplerInfo, nullptr, &hdrSampler) != VK_SUCCESS) {
+                setError("vkCreateSampler(hdr) failed");
+                return false;
+            }
+
+            // Tonemap pass samples the HDR target.
+            VkDescriptorSetAllocateInfo allocateSetInfo{};
+            allocateSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateSetInfo.descriptorPool = tonemapDescriptorPool;
+            allocateSetInfo.descriptorSetCount = 1;
+            allocateSetInfo.pSetLayouts = &tonemapDescriptorLayout;
+            if (vkAllocateDescriptorSets(device, &allocateSetInfo, &tonemapDescriptorSet) != VK_SUCCESS) {
+                setError("vkAllocateDescriptorSets(tonemap) failed");
+                return false;
+            }
+            VkDescriptorImageInfo hdrDescriptor{};
+            hdrDescriptor.sampler = hdrSampler;
+            hdrDescriptor.imageView = hdrView;
+            hdrDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = tonemapDescriptorSet;
+            write.dstBinding = 0;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.descriptorCount = 1;
+            write.pImageInfo = &hdrDescriptor;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+
+        if (reflectionsEnabled) {
+            if (!createReflectRenderPass()) {
+                return false;
+            }
+            const std::uint32_t reflectTargetWidth = std::max(1u, static_cast<std::uint32_t>(
+                static_cast<float>(mainWidth) * reflectionScale));
+            const std::uint32_t reflectTargetHeight = std::max(1u, static_cast<std::uint32_t>(
+                static_cast<float>(mainHeight) * reflectionScale));
+            if (!createColorTarget(
+                    colorFormat,
+                    0,
+                    reflectTargetWidth,
+                    reflectTargetHeight,
+                    reflectRenderPass != VK_NULL_HANDLE ? reflectRenderPass : renderPass,
+                    reflectView,
+                    reflectFramebuffer,
+                    reflectImage,
+                    reflectMemory,
+                    reflectDepthView,
+                    reflectDepthImage,
+                    reflectDepthMemory)) {
+                return false;
+            }
+            reflectWidth = reflectTargetWidth;
+            reflectHeight = reflectTargetHeight;
+        }
+
+        if (!createShadowResources()) {
+            return false;
+        }
+        if (!createSceneUniforms()) {
+            return false;
+        }
+        refreshSceneTextureBinding();
+        if (reflectionsEnabled && reflectView != VK_NULL_HANDLE) {
+            for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
+                if (sceneDescriptorSets[slot] == VK_NULL_HANDLE) {
+                    continue;
+                }
+                VkDescriptorImageInfo reflectDescriptor{};
+                reflectDescriptor.sampler = reflectSampler;
+                reflectDescriptor.imageView = reflectView;
+                reflectDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = sceneDescriptorSets[slot];
+                write.dstBinding = 2;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                write.descriptorCount = 1;
+                write.pImageInfo = &reflectDescriptor;
+                vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+            }
+        }
         return true;
     }
 
@@ -1262,6 +2263,69 @@ struct Graphics::Impl {
         renderPassInfo.pSubpasses = &subpass;
         if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
             setError("vkCreateRenderPass failed");
+            return false;
+        }
+        return true;
+    }
+
+    // HDR render pass: same structure as the main one, HDR color format.
+    bool createHdrRenderPass() {
+        if (hdrRenderPass != VK_NULL_HANDLE) {
+            return true;
+        }
+        if (depthFormat == VK_FORMAT_UNDEFINED) {
+            depthFormat = chooseDepthFormat();
+            if (depthFormat == VK_FORMAT_UNDEFINED) {
+                setError("No supported depth attachment format");
+                return false;
+            }
+        }
+
+        VkAttachmentDescription colorAttachment{};
+        colorAttachment.format = hdrFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Ends sampled: the tonemap pass samples the HDR target as a texture.
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkAttachmentDescription depthAttachment{};
+        depthAttachment.format = depthFormat;
+        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        std::array<VkAttachmentDescription, 2> attachments{colorAttachment, depthAttachment};
+
+        VkAttachmentReference colorReference{};
+        colorReference.attachment = 0;
+        colorReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthReference{};
+        depthReference.attachment = 1;
+        depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorReference;
+        subpass.pDepthStencilAttachment = &depthReference;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
+        renderPassInfo.pAttachments = attachments.data();
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &hdrRenderPass) != VK_SUCCESS) {
+            setError("vkCreateRenderPass(hdr) failed");
             return false;
         }
         return true;
@@ -1540,12 +2604,162 @@ struct Graphics::Impl {
         vkDeviceWaitIdle(device);
         try {
             destroySwapchainResources();
-            return createSwapchainResources();
+            if (!createSwapchainResources()) {
+                return false;
+            }
+            // Quality targets follow the swapchain size.
+            return rebuildQualityTargets();
         } catch (...) {
             destroySwapchainResources();
             setError("Vulkan swapchain recreation failed due to allocation failure");
             return false;
         }
+    }
+
+    void recordMeshDraws(
+        const float viewProjMatrix[16],
+        std::uint32_t uniformSlot,
+        VkPipeline pipelineOverride = VK_NULL_HANDLE) noexcept {
+        PushConstants push{};
+        std::memcpy(push.viewProj, viewProjMatrix, sizeof(push.viewProj));
+        vkCmdBindPipeline(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipelineOverride != VK_NULL_HANDLE ? pipelineOverride : meshPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            meshPipelineLayout,
+            0,
+            1,
+            &sceneDescriptorSets[uniformSlot],
+            0,
+            nullptr);
+
+        for (const RenderItem& item : pendingItems) {
+            const auto meshIt = meshes.find(item.meshId);
+            if (meshIt == meshes.end() || meshIt->second.vertexBuffer == VK_NULL_HANDLE) {
+                continue;
+            }
+            std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
+            vkCmdPushConstants(
+                commandBuffer,
+                meshPipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(PushConstants),
+                &push);
+
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &meshIt->second.vertexBuffer, &offset);
+            if (meshIt->second.indexBuffer != VK_NULL_HANDLE) {
+                vkCmdBindIndexBuffer(commandBuffer, meshIt->second.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(commandBuffer, meshIt->second.indexCount, 1, 0, 0, 0);
+            } else {
+                vkCmdDraw(commandBuffer, meshIt->second.vertexCount, 1, 0, 0);
+            }
+        }
+    }
+
+    // Shadow pass: meshes into the sun depth map with the reflected camera
+    // when reflections are on (the mirror needs shadows of reflected geometry).
+    void recordShadowPass() {
+        float sunMatrix[16];
+        buildSunMatrix(sunMatrix);
+
+        VkClearValue clearValue{};
+        clearValue.depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = shadowRenderPass;
+        begin.framebuffer = shadowFramebuffer;
+        begin.renderArea.extent = {shadowMapSize, shadowMapSize};
+        begin.clearValueCount = 1;
+        begin.pClearValues = &clearValue;
+        vkCmdBeginRenderPass(commandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport viewport{};
+        viewport.width = static_cast<float>(shadowMapSize);
+        viewport.height = static_cast<float>(shadowMapSize);
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkRect2D scissor{};
+        scissor.extent = {shadowMapSize, shadowMapSize};
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            shadowPipelineLayout,
+            0,
+            1,
+            &sceneDescriptorSets[0],
+            0,
+            nullptr);
+        PushConstants push{};
+        std::memcpy(push.viewProj, sunMatrix, sizeof(push.viewProj));
+        for (const RenderItem& item : pendingItems) {
+            const auto meshIt = meshes.find(item.meshId);
+            if (meshIt == meshes.end() || meshIt->second.vertexBuffer == VK_NULL_HANDLE) {
+                continue;
+            }
+            std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
+            vkCmdPushConstants(
+                commandBuffer,
+                shadowPipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(PushConstants),
+                &push);
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &meshIt->second.vertexBuffer, &offset);
+            if (meshIt->second.indexBuffer != VK_NULL_HANDLE) {
+                vkCmdBindIndexBuffer(commandBuffer, meshIt->second.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(commandBuffer, meshIt->second.indexCount, 1, 0, 0, 0);
+            } else {
+                vkCmdDraw(commandBuffer, meshIt->second.vertexCount, 1, 0, 0);
+            }
+        }
+        vkCmdEndRenderPass(commandBuffer);
+    }
+
+    // Fullscreen tonemap/copy pass from the HDR target into `target`.
+    void recordTonemapPass(VkFramebuffer target, std::uint32_t width, std::uint32_t height) {
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        clearValues[1].depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = renderPass;
+        begin.framebuffer = target;
+        begin.renderArea.extent = {width, height};
+        begin.clearValueCount = static_cast<std::uint32_t>(clearValues.size());
+        begin.pClearValues = clearValues.data();
+        vkCmdBeginRenderPass(commandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport viewport{};
+        viewport.width = static_cast<float>(width);
+        viewport.height = static_cast<float>(height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkRect2D scissor{};
+        scissor.extent = {width, height};
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemapPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            tonemapPipelineLayout,
+            0,
+            1,
+            &tonemapDescriptorSet,
+            0,
+            nullptr);
+        vkCmdDraw(commandBuffer, 4, 1, 0, 0);
+        vkCmdEndRenderPass(commandBuffer);
     }
 
     bool recordFrame(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept {
@@ -1562,89 +2776,142 @@ struct Graphics::Impl {
             return false;
         }
 
-        std::array<VkClearValue, 2> clearValues{};
-        clearValues[0].color = {{0.02f, 0.03f, 0.05f, 1.0f}};
-        clearValues[1].depthStencil = {1.0f, 0};
-        VkRenderPassBeginInfo renderPassBegin{};
-        renderPassBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassBegin.renderPass = renderPass;
-        renderPassBegin.framebuffer = targetFramebuffer;
-        renderPassBegin.renderArea.extent = {width, height};
-        renderPassBegin.clearValueCount = static_cast<std::uint32_t>(clearValues.size());
-        renderPassBegin.pClearValues = clearValues.data();
-        vkCmdBeginRenderPass(commandBuffer, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
+        const std::uint32_t uniformSlot = currentFrameSlot % sceneUniformCount;
+        float sunMatrix[16];
+        buildSunMatrix(sunMatrix);
+        writeSceneUniforms(uniformSlot, sunMatrix);
 
-        VkViewport viewport{};
-        viewport.x = 0.0f;
-        viewport.y = 0.0f;
-        viewport.width = static_cast<float>(width);
-        viewport.height = static_cast<float>(height);
-        viewport.minDepth = 0.0f;
-        viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-        VkRect2D scissor{};
-        scissor.offset = {0, 0};
-        scissor.extent = {width, height};
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-        if (drawDebugTriangle) {
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            vkCmdBindDescriptorSets(
+        if (shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
+            recordShadowPass();
+            // Mesh fragment shader samples the shadow map as DEPTH_READ_ONLY;
+            // next frame's shadow pass writes it again.
+            std::array<VkImageMemoryBarrier, 2> shadowBarriers{};
+            shadowBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            shadowBarriers[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            shadowBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            shadowBarriers[0].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            shadowBarriers[0].newLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+            shadowBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadowBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadowBarriers[0].image = shadowImage;
+            shadowBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            shadowBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            shadowBarriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            shadowBarriers[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            shadowBarriers[1].oldLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+            shadowBarriers[1].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            shadowBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadowBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadowBarriers[1].image = shadowImage;
+            shadowBarriers[1].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            vkCmdPipelineBarrier(
                 commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                pipelineLayout,
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
                 0,
-                1,
-                &descriptorSet,
                 0,
-                nullptr);
-            vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+                nullptr,
+                0,
+                nullptr,
+                2,
+                shadowBarriers.data());
         }
 
-        if (meshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
-            PushConstants push{};
-            std::memcpy(push.viewProj, pendingViewProj, sizeof(push.viewProj));
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                meshPipelineLayout,
-                0,
-                1,
-                &descriptorSet,
-                0,
-                nullptr);
+        // Reflection pass: mirrored camera renders the scene into a smaller
+        // target first, so the main pass can sample it.
+        const bool useReflection = reflectionsEnabled && reflectFramebuffer != VK_NULL_HANDLE;
+        if (useReflection && !pendingItems.empty()) {
+            std::array<VkClearValue, 2> reflectClear{};
+            reflectClear[0].color = {{0.02f, 0.03f, 0.05f, 1.0f}};
+            reflectClear[1].depthStencil = {1.0f, 0};
+            VkRenderPassBeginInfo renderPassBegin{};
+            renderPassBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            renderPassBegin.renderPass = renderPass;
+            renderPassBegin.framebuffer = reflectFramebuffer;
+            renderPassBegin.renderArea.extent = {reflectWidth, reflectHeight};
+            renderPassBegin.clearValueCount = static_cast<std::uint32_t>(reflectClear.size());
+            renderPassBegin.pClearValues = reflectClear.data();
+            vkCmdBeginRenderPass(commandBuffer, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-            std::uint32_t drawnItems = 0;
-            for (const RenderItem& item : pendingItems) {
-                const auto meshIt = meshes.find(item.meshId);
-                if (meshIt == meshes.end() || meshIt->second.vertexBuffer == VK_NULL_HANDLE) {
-                    continue;
-                }
-                ++drawnItems;
-                std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
-                vkCmdPushConstants(
+            VkViewport reflectViewport{};
+            reflectViewport.width = static_cast<float>(reflectWidth);
+            reflectViewport.height = static_cast<float>(reflectHeight);
+            reflectViewport.maxDepth = 1.0f;
+            vkCmdSetViewport(commandBuffer, 0, 1, &reflectViewport);
+            VkRect2D reflectScissor{};
+            reflectScissor.extent = {reflectWidth, reflectHeight};
+            vkCmdSetScissor(commandBuffer, 0, 1, &reflectScissor);
+
+            const Mat4 mirroredView = reflectViewMatrix();
+            float reflectViewProj[16];
+            Impl::multiplyMat4(pendingProjection, mirroredView.m[0], reflectViewProj);
+            recordMeshDraws(reflectViewProj, uniformSlot);            vkCmdEndRenderPass(commandBuffer);
+        }
+
+        // Main pass: meshes render into the HDR target at Medium/High, or
+        // straight into the final target at Low.
+        VkFramebuffer mainFramebuffer = targetFramebuffer;
+        std::uint32_t mainWidth = width;
+        std::uint32_t mainHeight = height;
+        VkRenderPass mainRenderPass = renderPass;
+        VkPipeline mainMeshPipeline = meshPipeline;
+        const bool useHdr = hdrEnabled && hdrFramebuffer != VK_NULL_HANDLE && hdrMeshPipeline != VK_NULL_HANDLE;
+        if (useHdr) {
+            mainFramebuffer = hdrFramebuffer;
+            mainWidth = hdrWidth;
+            mainHeight = hdrHeight;
+            mainRenderPass = hdrRenderPass;
+            mainMeshPipeline = hdrMeshPipeline;
+        }
+
+        {
+            std::array<VkClearValue, 2> clearValues{};
+            clearValues[0].color = {{0.02f, 0.03f, 0.05f, 1.0f}};
+            clearValues[1].depthStencil = {1.0f, 0};
+            VkRenderPassBeginInfo renderPassBegin{};
+            renderPassBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            renderPassBegin.renderPass = mainRenderPass;
+            renderPassBegin.framebuffer = mainFramebuffer;
+            renderPassBegin.renderArea.extent = {mainWidth, mainHeight};
+            renderPassBegin.clearValueCount = static_cast<std::uint32_t>(clearValues.size());
+            renderPassBegin.pClearValues = clearValues.data();
+            vkCmdBeginRenderPass(commandBuffer, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+            VkViewport viewport{};
+            viewport.width = static_cast<float>(mainWidth);
+            viewport.height = static_cast<float>(mainHeight);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+            VkRect2D scissor{};
+            scissor.extent = {mainWidth, mainHeight};
+            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+            // The debug triangle pipeline targets the non-HDR color format;
+            // skip it when the scene renders through the HDR pass.
+            if (drawDebugTriangle && !useHdr) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                vkCmdBindDescriptorSets(
                     commandBuffer,
-                    meshPipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipelineLayout,
                     0,
-                    sizeof(PushConstants),
-                    &push);
-
-                VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, &meshIt->second.vertexBuffer, &offset);
-                if (meshIt->second.indexBuffer != VK_NULL_HANDLE) {
-                    vkCmdBindIndexBuffer(commandBuffer, meshIt->second.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                    vkCmdDrawIndexed(commandBuffer, meshIt->second.indexCount, 1, 0, 0, 0);
-                } else {
-                    vkCmdDraw(commandBuffer, meshIt->second.vertexCount, 1, 0, 0);
-                }
+                    1,
+                    &descriptorSet,
+                    0,
+                    nullptr);
+                vkCmdDraw(commandBuffer, 3, 1, 0, 0);
             }
-            engineLog("frame drawn: drawn=%u/%zu", drawnItems, pendingItems.size());
+
+            if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
+                recordMeshDraws(pendingViewProj, uniformSlot, mainMeshPipeline);
+            }
+            vkCmdEndRenderPass(commandBuffer);
         }
 
-        vkCmdEndRenderPass(commandBuffer);
+        if (useHdr) {
+            recordTonemapPass(targetFramebuffer, width, height);
+        }
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             setError("vkEndCommandBuffer failed");
@@ -1670,6 +2937,10 @@ struct Graphics::Impl {
             if (meshPipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device, meshPipeline, nullptr);
                 meshPipeline = VK_NULL_HANDLE;
+            }
+            if (hdrMeshPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, hdrMeshPipeline, nullptr);
+                hdrMeshPipeline = VK_NULL_HANDLE;
             }
             if (meshPipelineLayout != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(device, meshPipelineLayout, nullptr);
@@ -1712,11 +2983,61 @@ struct Graphics::Impl {
             meshes.clear();
             nextMeshId = 1;
             pendingItems.clear();
+            destroyHeadlessTarget();
+            destroyQualityTargets();
             destroyDepthResources();
             destroySwapchainResources();
+            if (shadowPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, shadowPipeline, nullptr);
+                shadowPipeline = VK_NULL_HANDLE;
+            }
+            if (shadowPipelineLayout != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device, shadowPipelineLayout, nullptr);
+                shadowPipelineLayout = VK_NULL_HANDLE;
+            }
+            if (shadowVertexShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, shadowVertexShader, nullptr);
+                shadowVertexShader = VK_NULL_HANDLE;
+            }
+            if (shadowFragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, shadowFragmentShader, nullptr);
+                shadowFragmentShader = VK_NULL_HANDLE;
+            }
+            if (sceneDescriptorLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device, sceneDescriptorLayout, nullptr);
+                sceneDescriptorLayout = VK_NULL_HANDLE;
+            }
+            if (tonemapPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, tonemapPipeline, nullptr);
+                tonemapPipeline = VK_NULL_HANDLE;
+            }
+            if (tonemapPipelineLayout != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device, tonemapPipelineLayout, nullptr);
+                tonemapPipelineLayout = VK_NULL_HANDLE;
+            }
+            if (tonemapDescriptorPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device, tonemapDescriptorPool, nullptr);
+                tonemapDescriptorPool = VK_NULL_HANDLE;
+            }
+            if (tonemapDescriptorLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device, tonemapDescriptorLayout, nullptr);
+                tonemapDescriptorLayout = VK_NULL_HANDLE;
+            }
+            if (tonemapVertexShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, tonemapVertexShader, nullptr);
+                tonemapVertexShader = VK_NULL_HANDLE;
+            }
+            if (tonemapFragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, tonemapFragmentShader, nullptr);
+                tonemapFragmentShader = VK_NULL_HANDLE;
+            }
             if (renderPass != VK_NULL_HANDLE) {
                 vkDestroyRenderPass(device, renderPass, nullptr);
                 renderPass = VK_NULL_HANDLE;
+            }
+            if (hdrRenderPass != VK_NULL_HANDLE) {
+                vkDestroyRenderPass(device, hdrRenderPass, nullptr);
+                hdrRenderPass = VK_NULL_HANDLE;
             }
             if (vertexShader != VK_NULL_HANDLE) {
                 vkDestroyShaderModule(device, vertexShader, nullptr);
@@ -1748,6 +3069,7 @@ struct Graphics::Impl {
             meshes.clear();
             nextMeshId = 1;
             pendingItems.clear();
+            destroyQualityTargets();
             destroyDepthResources();
         }
 
@@ -1798,6 +3120,15 @@ struct Graphics::Impl {
         window = nullptr;
 #endif
         deviceName.clear();
+        hdrEnabled = false;
+        reflectionsEnabled = false;
+        shadowTaps = 9;
+        reflectionScale = 0.0f;
+        shadowStrength = 0.35f;
+        textureScalePercent = 100;
+        activeQuality = Aporia::GraphicsQuality::Medium;
+        environment = Aporia::EnvironmentState{};
+        hdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
     }
 };
 
@@ -1826,6 +3157,13 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->presentCount = 0;
     impl_->headless = config.headless;
     impl_->validationMessageCount = 0;
+    impl_->environment.sunDirection[0] = config.sunDirection[0];
+    impl_->environment.sunDirection[1] = config.sunDirection[1];
+    impl_->environment.sunDirection[2] = config.sunDirection[2];
+    impl_->environment.sunIntensity = 1.0f;
+    impl_->environment.mirrorZ = config.mirrorZ;
+    impl_->shadowExtent = config.shadowExtent;
+    impl_->applyQualityPreset(config.quality);
 
     struct InitializationGuard {
         Impl* impl = nullptr;
@@ -2058,6 +3396,23 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         return false;
     }
 
+    if (impl_->hdrEnabled) {
+        impl_->hdrFormat = chooseHdrFormat(impl_->physicalDevice);
+        if (impl_->hdrFormat == VK_FORMAT_UNDEFINED) {
+            impl_->setError("No supported HDR color format");
+            shutdown();
+            return false;
+        }
+        if (!impl_->createHdrRenderPass()) {
+            shutdown();
+            return false;
+        }
+    }
+    if (!impl_->createShadowRenderPass()) {
+        shutdown();
+        return false;
+    }
+
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -2115,6 +3470,11 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         return false;
     }
     if (!impl_->createDescriptorResources()) {
+        shutdown();
+        return false;
+    }
+    // Scene layout must exist before the mesh/shadow pipelines referencing it.
+    if (!impl_->createSceneDescriptorLayout()) {
         shutdown();
         return false;
     }
@@ -2287,7 +3647,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     VkPipelineLayoutCreateInfo meshLayoutInfo{};
     meshLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     meshLayoutInfo.setLayoutCount = 1;
-    meshLayoutInfo.pSetLayouts = &impl_->descriptorSetLayout;
+    meshLayoutInfo.pSetLayouts = &impl_->sceneDescriptorLayout;
     meshLayoutInfo.pushConstantRangeCount = 1;
     meshLayoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(impl_->device, &meshLayoutInfo, nullptr, &impl_->meshPipelineLayout) != VK_SUCCESS) {
@@ -2355,8 +3715,232 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     meshPipelineInfo.layout = impl_->meshPipelineLayout;
     meshPipelineInfo.renderPass = impl_->renderPass;
     meshPipelineInfo.subpass = 0;
+    // Quality specialization: PCF tap count and reflection toggle compile per
+    // preset, so Low pays neither cost.
+    VkSpecializationMapEntry specEntries[2]{};
+    specEntries[0].constantID = 0;
+    specEntries[0].offset = 0;
+    specEntries[0].size = sizeof(std::int32_t);
+    specEntries[1].constantID = 1;
+    specEntries[1].offset = sizeof(std::int32_t);
+    specEntries[1].size = sizeof(float);
+    float specReflection = impl_->reflectionsEnabled ? 1.0f : 0.0f;
+    std::int32_t specTaps = impl_->shadowTaps;
+    std::int32_t specData[2] = {specTaps, 0};
+    std::memcpy(specData + 1, &specReflection, sizeof(float));
+    VkSpecializationInfo meshSpecInfo{};
+    meshSpecInfo.mapEntryCount = 2;
+    meshSpecInfo.pMapEntries = specEntries;
+    meshSpecInfo.dataSize = sizeof(specData);
+    meshSpecInfo.pData = specData;
+    meshShaderStages[1].pSpecializationInfo = &meshSpecInfo;
     if (vkCreateGraphicsPipelines(impl_->device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &impl_->meshPipeline) != VK_SUCCESS) {
         impl_->setError("vkCreateGraphicsPipelines(mesh) failed");
+        shutdown();
+        return false;
+    }
+    if (impl_->hdrRenderPass != VK_NULL_HANDLE) {
+        meshPipelineInfo.renderPass = impl_->hdrRenderPass;
+        if (vkCreateGraphicsPipelines(impl_->device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &impl_->hdrMeshPipeline) != VK_SUCCESS) {
+            impl_->setError("vkCreateGraphicsPipelines(hdr mesh) failed");
+            shutdown();
+            return false;
+        }
+    }
+
+    // Quality pipelines: shadow depth pass and HDR tonemap pass.
+    const std::vector<std::uint32_t> shadowVertexCode = readSpirv(shaderDirectory + "/shadow.vert.spv", spirvLoaded);
+    if (!spirvLoaded) {
+        impl_->setError("Failed to load compiled shadow vertex shader");
+        shutdown();
+        return false;
+    }
+    const std::vector<std::uint32_t> shadowFragmentCode = readSpirv(shaderDirectory + "/shadow.frag.spv", spirvLoaded);
+    if (!spirvLoaded) {
+        impl_->setError("Failed to load compiled shadow fragment shader");
+        shutdown();
+        return false;
+    }
+    VkShaderModuleCreateInfo shadowVertexModuleInfo{};
+    shadowVertexModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    shadowVertexModuleInfo.codeSize = shadowVertexCode.size() * sizeof(std::uint32_t);
+    shadowVertexModuleInfo.pCode = shadowVertexCode.data();
+    if (vkCreateShaderModule(impl_->device, &shadowVertexModuleInfo, nullptr, &impl_->shadowVertexShader) != VK_SUCCESS) {
+        impl_->setError("vkCreateShaderModule(shadow vertex) failed");
+        shutdown();
+        return false;
+    }
+    VkShaderModuleCreateInfo shadowFragmentModuleInfo{};
+    shadowFragmentModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    shadowFragmentModuleInfo.codeSize = shadowFragmentCode.size() * sizeof(std::uint32_t);
+    shadowFragmentModuleInfo.pCode = shadowFragmentCode.data();
+    if (vkCreateShaderModule(impl_->device, &shadowFragmentModuleInfo, nullptr, &impl_->shadowFragmentShader) != VK_SUCCESS) {
+        impl_->setError("vkCreateShaderModule(shadow fragment) failed");
+        shutdown();
+        return false;
+    }
+
+    VkPushConstantRange shadowPushRange{};
+    shadowPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    shadowPushRange.offset = 0;
+    shadowPushRange.size = sizeof(Impl::PushConstants);
+    VkPipelineLayoutCreateInfo shadowLayoutInfo{};
+    shadowLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    shadowLayoutInfo.setLayoutCount = 1;
+    shadowLayoutInfo.pSetLayouts = &impl_->sceneDescriptorLayout;
+    shadowLayoutInfo.pushConstantRangeCount = 1;
+    shadowLayoutInfo.pPushConstantRanges = &shadowPushRange;
+    if (vkCreatePipelineLayout(impl_->device, &shadowLayoutInfo, nullptr, &impl_->shadowPipelineLayout) != VK_SUCCESS) {
+        impl_->setError("vkCreatePipelineLayout(shadow) failed");
+        shutdown();
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo shadowStages[2]{};
+    shadowStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shadowStages[0].module = impl_->shadowVertexShader;
+    shadowStages[0].pName = "main";
+    shadowStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shadowStages[1].module = impl_->shadowFragmentShader;
+    shadowStages[1].pName = "main";
+
+    VkPipelineDepthStencilStateCreateInfo shadowDepthStencil{};
+    shadowDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    shadowDepthStencil.depthTestEnable = VK_TRUE;
+    shadowDepthStencil.depthWriteEnable = VK_TRUE;
+    shadowDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    shadowDepthStencil.minDepthBounds = 0.0f;
+    shadowDepthStencil.maxDepthBounds = 1.0f;
+
+    VkGraphicsPipelineCreateInfo shadowPipelineInfo{};
+    shadowPipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    shadowPipelineInfo.stageCount = 2;
+    shadowPipelineInfo.pStages = shadowStages;
+    shadowPipelineInfo.pVertexInputState = &meshVertexInput;
+    shadowPipelineInfo.pInputAssemblyState = &inputAssembly;
+    shadowPipelineInfo.pViewportState = &viewportState;
+    shadowPipelineInfo.pRasterizationState = &rasterization;
+    shadowPipelineInfo.pMultisampleState = &multisample;
+    shadowPipelineInfo.pDepthStencilState = &shadowDepthStencil;
+    shadowPipelineInfo.pDynamicState = &dynamicState;
+    shadowPipelineInfo.layout = impl_->shadowPipelineLayout;
+    shadowPipelineInfo.renderPass = impl_->shadowRenderPass;
+    shadowPipelineInfo.subpass = 0;
+    if (vkCreateGraphicsPipelines(impl_->device, VK_NULL_HANDLE, 1, &shadowPipelineInfo, nullptr, &impl_->shadowPipeline) != VK_SUCCESS) {
+        impl_->setError("vkCreateGraphicsPipelines(shadow) failed");
+        shutdown();
+        return false;
+    }
+
+    const std::vector<std::uint32_t> tonemapVertexCode = readSpirv(shaderDirectory + "/tonemap.vert.spv", spirvLoaded);
+    if (!spirvLoaded) {
+        impl_->setError("Failed to load compiled tonemap vertex shader");
+        shutdown();
+        return false;
+    }
+    const std::vector<std::uint32_t> tonemapFragmentCode = readSpirv(shaderDirectory + "/tonemap.frag.spv", spirvLoaded);
+    if (!spirvLoaded) {
+        impl_->setError("Failed to load compiled tonemap fragment shader");
+        shutdown();
+        return false;
+    }
+    VkShaderModuleCreateInfo tonemapVertexModuleInfo{};
+    tonemapVertexModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    tonemapVertexModuleInfo.codeSize = tonemapVertexCode.size() * sizeof(std::uint32_t);
+    tonemapVertexModuleInfo.pCode = tonemapVertexCode.data();
+    if (vkCreateShaderModule(impl_->device, &tonemapVertexModuleInfo, nullptr, &impl_->tonemapVertexShader) != VK_SUCCESS) {
+        impl_->setError("vkCreateShaderModule(tonemap vertex) failed");
+        shutdown();
+        return false;
+    }
+    VkShaderModuleCreateInfo tonemapFragmentModuleInfo{};
+    tonemapFragmentModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    tonemapFragmentModuleInfo.codeSize = tonemapFragmentCode.size() * sizeof(std::uint32_t);
+    tonemapFragmentModuleInfo.pCode = tonemapFragmentCode.data();
+    if (vkCreateShaderModule(impl_->device, &tonemapFragmentModuleInfo, nullptr, &impl_->tonemapFragmentShader) != VK_SUCCESS) {
+        impl_->setError("vkCreateShaderModule(tonemap fragment) failed");
+        shutdown();
+        return false;
+    }
+
+    VkDescriptorSetLayoutBinding hdrSamplerBinding{};
+    hdrSamplerBinding.binding = 0;
+    hdrSamplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    hdrSamplerBinding.descriptorCount = 1;
+    hdrSamplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo tonemapLayoutInfo{};
+    tonemapLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    tonemapLayoutInfo.bindingCount = 1;
+    tonemapLayoutInfo.pBindings = &hdrSamplerBinding;
+    if (vkCreateDescriptorSetLayout(impl_->device, &tonemapLayoutInfo, nullptr, &impl_->tonemapDescriptorLayout) != VK_SUCCESS) {
+        impl_->setError("vkCreateDescriptorSetLayout(tonemap) failed");
+        shutdown();
+        return false;
+    }
+    VkPipelineLayoutCreateInfo tonemapPipelineLayoutInfo{};
+    tonemapPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    tonemapPipelineLayoutInfo.setLayoutCount = 1;
+    tonemapPipelineLayoutInfo.pSetLayouts = &impl_->tonemapDescriptorLayout;
+    if (vkCreatePipelineLayout(impl_->device, &tonemapPipelineLayoutInfo, nullptr, &impl_->tonemapPipelineLayout) != VK_SUCCESS) {
+        impl_->setError("vkCreatePipelineLayout(tonemap) failed");
+        shutdown();
+        return false;
+    }
+    VkDescriptorPoolSize tonemapPoolSize{};
+    tonemapPoolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    tonemapPoolSize.descriptorCount = 1;
+    VkDescriptorPoolCreateInfo tonemapPoolInfo{};
+    tonemapPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    tonemapPoolInfo.maxSets = 1;
+    tonemapPoolInfo.poolSizeCount = 1;
+    tonemapPoolInfo.pPoolSizes = &tonemapPoolSize;
+    if (vkCreateDescriptorPool(impl_->device, &tonemapPoolInfo, nullptr, &impl_->tonemapDescriptorPool) != VK_SUCCESS) {
+        impl_->setError("vkCreateDescriptorPool(tonemap) failed");
+        shutdown();
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo tonemapStages[2]{};
+    tonemapStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    tonemapStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    tonemapStages[0].module = impl_->tonemapVertexShader;
+    tonemapStages[0].pName = "main";
+    tonemapStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    tonemapStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    tonemapStages[1].module = impl_->tonemapFragmentShader;
+    tonemapStages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo emptyVertexInput{};
+    emptyVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo stripAssembly{};
+    stripAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    stripAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    stripAssembly.primitiveRestartEnable = VK_FALSE;
+
+    VkGraphicsPipelineCreateInfo tonemapPipelineInfo{};
+    tonemapPipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    tonemapPipelineInfo.stageCount = 2;
+    tonemapPipelineInfo.pStages = tonemapStages;
+    tonemapPipelineInfo.pVertexInputState = &emptyVertexInput;
+    tonemapPipelineInfo.pInputAssemblyState = &stripAssembly;
+    tonemapPipelineInfo.pViewportState = &viewportState;
+    tonemapPipelineInfo.pRasterizationState = &rasterization;
+    tonemapPipelineInfo.pMultisampleState = &multisample;
+    tonemapPipelineInfo.pDepthStencilState = &triangleDepthStencil;
+    tonemapPipelineInfo.pColorBlendState = &colorBlend;
+    tonemapPipelineInfo.pDynamicState = &dynamicState;
+    tonemapPipelineInfo.layout = impl_->tonemapPipelineLayout;
+    tonemapPipelineInfo.renderPass = impl_->renderPass;
+    tonemapPipelineInfo.subpass = 0;
+    if (vkCreateGraphicsPipelines(impl_->device, VK_NULL_HANDLE, 1, &tonemapPipelineInfo, nullptr, &impl_->tonemapPipeline) != VK_SUCCESS) {
+        impl_->setError("vkCreateGraphicsPipelines(tonemap) failed");
+        shutdown();
+        return false;
+    }
+
+    if (!impl_->rebuildQualityTargets()) {
         shutdown();
         return false;
     }
@@ -2371,6 +3955,21 @@ void Graphics::shutdown() noexcept {
     }
 }
 
+bool Graphics::setQuality(GraphicsQuality quality) {
+    if (!impl_) {
+        return false;
+    }
+    if (!initialized()) {
+        impl_->setError("Graphics is not initialized");
+        return false;
+    }
+    if (quality == impl_->activeQuality) {
+        return true;
+    }
+    impl_->applyQualityPreset(quality);
+    return impl_->rebuildQualityTargets();
+}
+
 bool Graphics::initialized() const noexcept {
     return impl_ && impl_->instance != VK_NULL_HANDLE && impl_->device != VK_NULL_HANDLE && impl_->pipeline != VK_NULL_HANDLE;
 }
@@ -2382,10 +3981,21 @@ bool Graphics::renderFrame() noexcept {
         }
         return false;
     }
-    if (impl_->headless) {
-        return renderHeadlessFrame();
+    LARGE_INTEGER startCounter{};
+    LARGE_INTEGER endCounter{};
+    LARGE_INTEGER frequency{};
+    const bool timing = QueryPerformanceCounter(&startCounter) != 0 &&
+                        QueryPerformanceFrequency(&frequency) != 0 && frequency.QuadPart > 0;
+    const bool submitted = impl_->headless ? renderHeadlessFrame() : renderNativeFrame();
+    if (timing && QueryPerformanceCounter(&endCounter) != 0) {
+        const double milliseconds = static_cast<double>(endCounter.QuadPart - startCounter.QuadPart) *
+                                    1000.0 / static_cast<double>(frequency.QuadPart);
+        constexpr double smoothing = 0.9;
+        impl_->avgFrameMs = impl_->avgFrameMs <= 0.0
+            ? milliseconds
+            : impl_->avgFrameMs * smoothing + milliseconds * (1.0 - smoothing);
     }
-    return renderNativeFrame();
+    return submitted;
 }
 
 bool Graphics::renderHeadlessFrame() noexcept {
@@ -2675,6 +4285,7 @@ void Graphics::destroyTexture2D(TextureHandle handle) noexcept {
     }
     impl_->destroyTextureResource(textureIt->second);
     impl_->textures.erase(textureIt);
+    impl_->refreshSceneTextureBinding();
 }
 
 MeshHandle Graphics::createMesh(const MeshData& data) {
@@ -2766,6 +4377,10 @@ std::uint64_t Graphics::meshVertexCount(MeshHandle handle) const noexcept {
 }
 
 bool Graphics::render(const CameraState& camera, const std::vector<RenderItem>& items) {
+    return render(camera, EnvironmentState{}, items);
+}
+
+bool Graphics::render(const CameraState& camera, const EnvironmentState& environment, const std::vector<RenderItem>& items) {
     if (!impl_) {
         return false;
     }
@@ -2774,14 +4389,11 @@ bool Graphics::render(const CameraState& camera, const std::vector<RenderItem>& 
         return false;
     }
     impl_->pendingCamera = camera;
+    impl_->environment = environment;
     Impl::multiplyMat4(camera.projectionMatrix, camera.viewMatrix, impl_->pendingViewProj);
+    std::memcpy(impl_->pendingProjection, camera.projectionMatrix, sizeof(impl_->pendingProjection));
     impl_->pendingItems = items;
     impl_->drawDebugTriangle = items.empty();
-    engineLog(
-        "render(): native=%d items=%zu meshes=%zu",
-        impl_->headless ? 0 : 1,
-        items.size(),
-        impl_->meshes.size());
     return renderFrame();
 }
 
@@ -2961,6 +4573,12 @@ GraphicsStats Graphics::stats() const noexcept {
     result.validationEnabled = impl_->validationEnabled;
     result.validationMessageCount = impl_->validationMessageCount;
     result.deviceName = impl_->deviceName;
+    result.quality = static_cast<std::uint32_t>(impl_->activeQuality);
+    result.hdrEnabled = impl_->hdrEnabled;
+    result.reflectionsEnabled = impl_->reflectionsEnabled;
+    result.shadowMapSize = impl_->shadowMapSize;
+    result.textureScalePercent = impl_->textureScalePercent;
+    result.avgFrameMs = impl_->avgFrameMs;
     for (std::uint32_t heap = 0; heap < impl_->memoryProperties.memoryHeapCount; ++heap) {
         if ((impl_->memoryProperties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
             result.deviceLocalMemory += impl_->memoryProperties.memoryHeaps[heap].size;

@@ -57,6 +57,10 @@ if(APORIA_ENABLE_GRAPHICS)
     set(APORIA_VULKAN_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/triangle.frag.spv")
     set(APORIA_VULKAN_MESH_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/mesh.vert.spv")
     set(APORIA_VULKAN_MESH_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/mesh.frag.spv")
+    set(APORIA_VULKAN_SHADOW_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/shadow.vert.spv")
+    set(APORIA_VULKAN_SHADOW_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/shadow.frag.spv")
+    set(APORIA_VULKAN_TONEMAP_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/tonemap.vert.spv")
+    set(APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/tonemap.frag.spv")
 
     add_custom_command(
         OUTPUT "${APORIA_VULKAN_VERTEX_SHADER}"
@@ -90,11 +94,47 @@ if(APORIA_ENABLE_GRAPHICS)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/mesh.frag"
         VERBATIM
     )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_SHADOW_VERTEX_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.vert"
+            -o "${APORIA_VULKAN_SHADOW_VERTEX_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.vert"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_SHADOW_FRAGMENT_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.frag"
+            -o "${APORIA_VULKAN_SHADOW_FRAGMENT_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow.frag"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_TONEMAP_VERTEX_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.vert"
+            -o "${APORIA_VULKAN_TONEMAP_VERTEX_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.vert"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag"
+            -o "${APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag"
+        VERBATIM
+    )
     add_custom_target(AporiaVulkanShaders DEPENDS
         "${APORIA_VULKAN_VERTEX_SHADER}"
         "${APORIA_VULKAN_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_MESH_VERTEX_SHADER}"
         "${APORIA_VULKAN_MESH_FRAGMENT_SHADER}"
+        "${APORIA_VULKAN_SHADOW_VERTEX_SHADER}"
+        "${APORIA_VULKAN_SHADOW_FRAGMENT_SHADER}"
+        "${APORIA_VULKAN_TONEMAP_VERTEX_SHADER}"
+        "${APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER}"
     )
 endif()
 
@@ -163,6 +203,9 @@ if (APORIA_BUILD_RENDER_TESTS)
     add_subdirectory(tests/graphics/1 aporia-render-test-1)
     add_subdirectory(tests/graphics/2 aporia-render-test-2)
     add_subdirectory(tests/graphics/3 aporia-render-test-3)
+    add_subdirectory(tests/graphics/4 aporia-render-test-4)
+    add_subdirectory(tests/graphics/5 aporia-render-test-5)
+    add_subdirectory(tests/graphics/6 aporia-render-test-6)
 endif()
 
 if (APORIA_BUILD_TESTS)

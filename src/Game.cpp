@@ -1,4 +1,5 @@
 #include "Aporia/Game.hpp"
+#include "Aporia/Body.hpp"
 
 #include <algorithm>
 #include <cmath>
