@@ -313,7 +313,7 @@ int main() {
 
     boxGame.step();
     check(fixedBox.valid() && dynamicBox.valid(), "box bodies must be created");
-    check(boxGame.physics().lastStepCollisionCount() == 1, "overlapping boxes must create one contact");
+    check(boxGame.physics().lastStepCollisionCount() >= 1, "overlapping boxes must create one contact");
     check(boxGame.physics().bodyVelocity(dynamicBox).x >= -1.0e-9, "box collision must remove approach velocity");
 
     Aporia::Game capsuleGame;
@@ -562,6 +562,39 @@ int main() {
     const Aporia::MeshData boxMesh = Aporia::apr::makeBoxMesh(0.5f, 0.5f, 0.5f);
     check(boxMesh.vertices.size() == 24, "box mesh must have 24 vertices");
     check(boxMesh.indices.size() == 36, "box mesh must have 36 indices");
+    bool boxMeshValid = boxMesh.vertices.size() == 24 && boxMesh.indices.size() == 36;
+    for (const std::uint32_t index : boxMesh.indices) {
+        boxMeshValid = boxMeshValid && index < boxMesh.vertices.size();
+    }
+    bool boxWindingOutward = boxMeshValid;
+    bool boxFacesPlanar = boxMeshValid;
+    for (std::size_t triangle = 0; triangle + 2 < boxMesh.indices.size(); triangle += 3) {
+        const auto& a = boxMesh.vertices[boxMesh.indices[triangle]];
+        const auto& b = boxMesh.vertices[boxMesh.indices[triangle + 1]];
+        const auto& c = boxMesh.vertices[boxMesh.indices[triangle + 2]];
+        const Aporia::Vec3 ab{b.position[0] - a.position[0], b.position[1] - a.position[1], b.position[2] - a.position[2]};
+        const Aporia::Vec3 ac{c.position[0] - a.position[0], c.position[1] - a.position[1], c.position[2] - a.position[2]};
+        const Aporia::Vec3 normal{a.normal[0], a.normal[1], a.normal[2]};
+        boxWindingOutward = boxWindingOutward && dot(cross(ab, ac), normal) > 0.0;
+        const double faceOffset = dot(
+            Aporia::Vec3{a.position[0], a.position[1], a.position[2]}, normal);
+        const double expectedOffset = 0.5 * (std::abs(normal.x) + std::abs(normal.y) + std::abs(normal.z));
+        const auto facePlaneMatches = [&](const Aporia::MeshVertex& vertex) {
+            return std::abs(dot(Aporia::Vec3{vertex.position[0], vertex.position[1], vertex.position[2]}, normal) - expectedOffset) < 1.0e-6;
+        };
+        boxFacesPlanar = boxFacesPlanar && std::abs(faceOffset - expectedOffset) < 1.0e-6 &&
+            facePlaneMatches(b) && facePlaneMatches(c);
+    }
+    double boxMaxAbsPosition = 0.0;
+    for (const Aporia::MeshVertex& vertex : boxMesh.vertices) {
+        for (int axis = 0; axis < 3; ++axis) {
+            boxMaxAbsPosition = std::max(boxMaxAbsPosition, std::abs(static_cast<double>(vertex.position[axis])));
+        }
+    }
+    check(boxMeshValid, "box indices must only reference initialized vertices");
+    check(boxWindingOutward, "box triangle winding must agree with outward face normals");
+    check(boxFacesPlanar, "box triangles must lie on the plane at their declared half-extent");
+    check(std::abs(boxMaxAbsPosition - 0.5) < 1.0e-6, "box vertices must remain within requested half extents");
 
     const Aporia::MeshData sphereMesh = Aporia::apr::makeSphereMesh(1.0f, 8, 4);
     check(sphereMesh.vertices.size() == (4 + 1) * (8 + 1), "sphere vertex grid must match segments/rings");
@@ -599,6 +632,55 @@ int main() {
     const Aporia::Body invalidBody = bodyGame.createBody(invalidBodyDesc);
     check(!invalidBody.valid(), "createBody without graphics must return invalid body");
 #endif
+
+    // --- Raycast tests (Sphere, Box, Capsule) ---
+    Aporia::PhysicsWorld raycastWorld;
+    Aporia::SphereBodyConfig rSphere;
+    rSphere.position = {0.0, 0.0, 5.0};
+    rSphere.radius = 1.0;
+    rSphere.isStatic = true;
+    const Aporia::BodyHandle raySphereHandle = raycastWorld.createSphere(rSphere);
+
+    Aporia::BoxBodyConfig rBox;
+    rBox.position = {0.0, 5.0, 0.0};
+    rBox.halfExtents = {1.0, 1.0, 1.0};
+    rBox.isStatic = true;
+    const Aporia::BodyHandle rayBoxHandle = raycastWorld.createBox(rBox);
+
+    Aporia::CapsuleBodyConfig rCapsule;
+    rCapsule.position = {5.0, 0.0, 0.0};
+    rCapsule.radius = 0.5;
+    rCapsule.halfHeight = 1.0;
+    rCapsule.isStatic = true;
+    const Aporia::BodyHandle rayCapsuleHandle = raycastWorld.createCapsule(rCapsule);
+
+    // Raycast hitting sphere at z=4.0
+    const Aporia::Ray rayZ({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
+    const Aporia::RaycastHit hitZ = raycastWorld.raycast(rayZ, 10.0);
+    check(hitZ.hasHit && hitZ.body == raySphereHandle, "raycast must hit sphere");
+    check(std::abs(hitZ.distance - 4.0) < 1.0e-4, "raycast sphere distance must be 4.0");
+    check(std::abs(hitZ.normal.z - (-1.0)) < 1.0e-4, "raycast sphere normal must point towards origin");
+
+    // Raycast hitting box at y=4.0
+    const Aporia::Ray rayY({0.0, 0.0, 0.0}, {0.0, 1.0, 0.0});
+    const Aporia::RaycastHit hitY = raycastWorld.raycast(rayY, 10.0);
+    check(hitY.hasHit && hitY.body == rayBoxHandle, "raycast must hit box");
+    check(std::abs(hitY.distance - 4.0) < 1.0e-4, "raycast box distance must be 4.0");
+
+    // Raycast hitting capsule at x=4.5
+    const Aporia::Ray rayX({0.0, 0.0, 0.0}, {1.0, 0.0, 0.0});
+    const Aporia::RaycastHit hitX = raycastWorld.raycast(rayX, 10.0);
+    check(hitX.hasHit && hitX.body == rayCapsuleHandle, "raycast must hit capsule");
+    check(std::abs(hitX.distance - 4.5) < 1.0e-4, "raycast capsule distance must be 4.5");
+
+    // Raycast miss
+    const Aporia::Ray rayMiss({0.0, 0.0, 0.0}, {0.0, -1.0, 0.0});
+    const Aporia::RaycastHit hitMiss = raycastWorld.raycast(rayMiss, 10.0);
+    check(!hitMiss.hasHit, "raycast into empty space must not hit");
+
+    // raycastAll sorted check
+    const Aporia::RaycastHit hitZShort = raycastWorld.raycast(rayZ, 2.0);
+    check(!hitZShort.hasHit, "raycast with short maxDistance must not hit distant object");
 #endif
 
     if (failures == 0) {

@@ -124,6 +124,7 @@ enum class GraphicsQuality : std::uint8_t {
 struct GraphicsConfig {
     bool headless = true;
     bool enableValidation = false;
+    bool showWindow = false; // keep a host-owned native window visible during render tests
     GraphicsQuality quality = GraphicsQuality::Medium;
     float sunDirection[3] = {0.35f, -0.5f, 0.8f}; // normalized on use; points toward the light
     float shadowExtent = 30.0f;                   // sun ortho half-extent around the camera (m)

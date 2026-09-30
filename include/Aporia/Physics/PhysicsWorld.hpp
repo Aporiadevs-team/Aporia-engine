@@ -2,12 +2,14 @@
 
 #include "Aporia/Core/Export.hpp"
 #include "Aporia/Math/Quaternion.hpp"
+#include "Aporia/Math/Ray.hpp"
 #include "Aporia/Math/Vector3.hpp"
 #include "Aporia/Terrain/Terrain.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace Aporia {
 
@@ -23,6 +25,19 @@ struct BodyHandle {
     }
 
     friend constexpr bool operator==(BodyHandle, BodyHandle) noexcept = default;
+};
+
+struct RaycastHit {
+    BodyHandle body{};
+    Vec3 point{};
+    Vec3 normal{0.0, 0.0, 1.0};
+    double distance = 0.0;
+    double fraction = 0.0;
+    bool hasHit = false;
+
+    explicit constexpr operator bool() const noexcept {
+        return hasHit;
+    }
 };
 
 struct BodySettings {
@@ -99,6 +114,16 @@ public:
 
     void step(double deltaSeconds) noexcept;
 
+    // Iterative constraint/contact solver iterations (default 8; 1..64).
+    void setSolverIterations(std::uint32_t iterations) noexcept;
+    [[nodiscard]] std::uint32_t solverIterations() const noexcept;
+
+    // Raycast query: returns the closest hit along the ray up to maxDistance.
+    [[nodiscard]] RaycastHit raycast(const Ray& ray, double maxDistance = 1000.0) const noexcept;
+
+    // Multi-hit raycast: all hits sorted from closest to furthest.
+    [[nodiscard]] std::vector<RaycastHit> raycastAll(const Ray& ray, double maxDistance = 1000.0) const;
+
     // Simulation frequency for step()-less usage and Game integration.
     // Default 300 Hz; any positive finite value is accepted.
     void setTimestepHz(double hz) noexcept;
@@ -106,6 +131,7 @@ public:
 
     [[nodiscard]] std::size_t lastStepCollisionCount() const noexcept;
     [[nodiscard]] ContactInfo lastContact() const noexcept;
+    [[nodiscard]] std::vector<ContactInfo> lastContacts() const;
 
 private:
     struct Impl;

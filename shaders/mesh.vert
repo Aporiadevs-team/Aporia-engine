@@ -26,7 +26,7 @@ layout(set = 0, binding = 3) uniform SceneUniforms {
 void main() {
     vec4 worldPosition = pc.model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPosition;
-    fragNormal = mat3(pc.model) * inNormal;
+    fragNormal = normalize(mat3(pc.model) * inNormal);
     fragUv = inUv;
     fragWorldPosition = worldPosition.xyz;
     fragShadowPosition = scene.sunViewProj * worldPosition;

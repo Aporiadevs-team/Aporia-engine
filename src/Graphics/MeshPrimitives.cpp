@@ -17,6 +17,16 @@ void addQuad(MeshData& mesh,
     mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
 }
 
+void addQuadReverse(MeshData& mesh,
+                    const MeshVertex& a,
+                    const MeshVertex& b,
+                    const MeshVertex& c,
+                    const MeshVertex& d) {
+    const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
+    mesh.vertices.insert(mesh.vertices.end(), {a, b, c, d});
+    mesh.indices.insert(mesh.indices.end(), {base, base + 2, base + 1, base, base + 3, base + 2});
+}
+
 MeshVertex vertex(const float position[3], const float normal[3], float u, float v) {
     MeshVertex result;
     result.position[0] = position[0];
@@ -37,22 +47,26 @@ MeshData makeBoxMesh(float halfX, float halfY, float halfZ) {
     mesh.vertices.reserve(24);
     mesh.indices.reserve(36);
 
-    const float px[3] = {halfX, 0.0f, 0.0f};
-    const float nx[3] = {-halfX, 0.0f, 0.0f};
-    const float py[3] = {0.0f, halfY, 0.0f};
-    const float ny[3] = {0.0f, -halfY, 0.0f};
-    const float pz[3] = {0.0f, 0.0f, halfZ};
-    const float nz[3] = {0.0f, 0.0f, -halfZ};
+    const float px[3] = {1.0f, 0.0f, 0.0f};
+    const float nx[3] = {-1.0f, 0.0f, 0.0f};
+    const float py[3] = {0.0f, 1.0f, 0.0f};
+    const float ny[3] = {0.0f, -1.0f, 0.0f};
+    const float pz[3] = {0.0f, 0.0f, 1.0f};
+    const float nz[3] = {0.0f, 0.0f, -1.0f};
 
     const auto face = [&](const float normal[3], const float uAxis[3], const float vAxis[3]) {
         const float center[3] = {normal[0] * halfX, normal[1] * halfY, normal[2] * halfZ};
+        const float uExtent[3] = {uAxis[0] * halfX, uAxis[1] * halfY, uAxis[2] * halfZ};
+        const float vExtent[3] = {vAxis[0] * halfX, vAxis[1] * halfY, vAxis[2] * halfZ};
         const float corners[4][3] = {
-            {center[0] - uAxis[0] - vAxis[0], center[1] - uAxis[1] - vAxis[1], center[2] - uAxis[2] - vAxis[2]},
-            {center[0] + uAxis[0] - vAxis[0], center[1] + uAxis[1] - vAxis[1], center[2] + uAxis[2] - vAxis[2]},
-            {center[0] + uAxis[0] + vAxis[0], center[1] + uAxis[1] + vAxis[1], center[2] + uAxis[2] + vAxis[2]},
-            {center[0] - uAxis[0] + vAxis[0], center[1] - uAxis[1] + vAxis[1], center[2] - uAxis[2] + vAxis[2]},
+            {center[0] - uExtent[0] - vExtent[0], center[1] - uExtent[1] - vExtent[1], center[2] - uExtent[2] - vExtent[2]},
+            {center[0] + uExtent[0] - vExtent[0], center[1] + uExtent[1] - vExtent[1], center[2] + uExtent[2] - vExtent[2]},
+            {center[0] + uExtent[0] + vExtent[0], center[1] + uExtent[1] + vExtent[1], center[2] + uExtent[2] + vExtent[2]},
+            {center[0] - uExtent[0] + vExtent[0], center[1] - uExtent[1] + vExtent[1], center[2] - uExtent[2] + vExtent[2]},
         };
-        addQuad(mesh,
+        // The face axes above produce inward triangle winding; reverse it so
+        // rasterization winding agrees with the explicitly stored outward normal.
+        addQuadReverse(mesh,
             vertex(corners[0], normal, 0.0f, 0.0f),
             vertex(corners[1], normal, 1.0f, 0.0f),
             vertex(corners[2], normal, 1.0f, 1.0f),

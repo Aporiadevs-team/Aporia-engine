@@ -731,7 +731,11 @@ struct Graphics::Impl {
             return false;
         }
 
-        vkResetCommandBuffer(commandBuffer, 0);
+        if (vkQueueWaitIdle(queue) != VK_SUCCESS || vkResetCommandBuffer(commandBuffer, 0) != VK_SUCCESS) {
+            destroyStaging();
+            setError("Waiting for the Vulkan command buffer before mesh upload failed");
+            return false;
+        }
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -744,6 +748,29 @@ struct Graphics::Impl {
         VkBufferCopy copyRegion{};
         copyRegion.size = size;
         vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
+
+        VkBufferMemoryBarrier uploadBarrier{};
+        uploadBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        uploadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        uploadBarrier.dstAccessMask =
+            ((usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0 ? VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT : 0) |
+            ((usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) != 0 ? VK_ACCESS_INDEX_READ_BIT : 0);
+        uploadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        uploadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        uploadBarrier.buffer = buffer;
+        uploadBarrier.offset = 0;
+        uploadBarrier.size = size;
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+            0,
+            0,
+            nullptr,
+            1,
+            &uploadBarrier,
+            0,
+            nullptr);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             destroyStaging();
@@ -1972,8 +1999,8 @@ struct Graphics::Impl {
         return true;
     }
 
-    // Sun view-projection: ortho box around a point near the camera, sized to
-    // shadowExtent, oriented along the sun direction (Z-up world).
+    // Sun view-projection keeps the light camera aimed at the scene center;
+    // the light travels opposite to the direction toward the sun.
     void buildSunMatrix(float outMatrix[16]) const noexcept {
         float directionX = environment.sunDirection[0];
         float directionY = environment.sunDirection[1];
@@ -1997,12 +2024,12 @@ struct Graphics::Impl {
             pendingCamera.position[0],
             pendingCamera.position[1],
             pendingCamera.position[2]);
-        const Vec3 center = cameraPosition + sunDirection * 20.0;
+        const Vec3 center = cameraPosition;
         const Vec3 eye = center + sunDirection * 60.0;
         const Vec3 up = std::abs(directionZ) < 0.9f ? Vec3(0.0, 0.0, 1.0) : Vec3(1.0, 0.0, 0.0);
         const Mat4 view = Mat4::lookAt(eye, center, up);
         const double extent = std::max(1.0, static_cast<double>(shadowExtent));
-        const Mat4 projection = Mat4::orthographicVulkan(extent, extent, 0.1, 200.0);
+        const Mat4 projection = Mat4::orthographicVulkan(extent * 2.0, extent * 2.0, 0.1, 200.0);
         const Mat4 sunViewProj = projection * view;
         std::memcpy(outMatrix, &sunViewProj, sizeof(sunViewProj));
     }
@@ -3222,6 +3249,10 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
             return false;
         }
         impl_->window = surfaceInfo.hwnd;
+        if (config.showWindow) {
+            ShowWindow(impl_->window, SW_SHOW);
+            UpdateWindow(impl_->window);
+        }
         impl_->destroySurface = reinterpret_cast<PFN_vkDestroySurfaceKHR>(
             vkGetInstanceProcAddr(impl_->instance, "vkDestroySurfaceKHR"));
         impl_->getPhysicalDeviceSurfaceSupport = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(
@@ -3636,7 +3667,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
 
     VkVertexInputBindingDescription vertexBinding{};
     vertexBinding.binding = 0;
-    vertexBinding.stride = sizeof(MeshVertex);
+    vertexBinding.stride = static_cast<std::uint32_t>(sizeof(MeshVertex));
     vertexBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     std::array<VkVertexInputAttributeDescription, 3> vertexAttributes{};
@@ -3659,6 +3690,20 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     meshVertexInput.pVertexBindingDescriptions = &vertexBinding;
     meshVertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(vertexAttributes.size());
     meshVertexInput.pVertexAttributeDescriptions = vertexAttributes.data();
+
+    // The depth-only shader consumes only position; sharing the full mesh
+    // declaration triggered validation warnings for unused normal/UV inputs.
+    VkVertexInputAttributeDescription shadowVertexAttribute{};
+    shadowVertexAttribute.binding = 0;
+    shadowVertexAttribute.location = 0;
+    shadowVertexAttribute.format = VK_FORMAT_R32G32B32_SFLOAT;
+    shadowVertexAttribute.offset = offsetof(MeshVertex, position);
+    VkPipelineVertexInputStateCreateInfo shadowVertexInput{};
+    shadowVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    shadowVertexInput.vertexBindingDescriptionCount = 1;
+    shadowVertexInput.pVertexBindingDescriptions = &vertexBinding;
+    shadowVertexInput.vertexAttributeDescriptionCount = 1;
+    shadowVertexInput.pVertexAttributeDescriptions = &shadowVertexAttribute;
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -3786,7 +3831,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     shadowPipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     shadowPipelineInfo.stageCount = 2;
     shadowPipelineInfo.pStages = shadowStages;
-    shadowPipelineInfo.pVertexInputState = &meshVertexInput;
+    shadowPipelineInfo.pVertexInputState = &shadowVertexInput;
     shadowPipelineInfo.pInputAssemblyState = &inputAssembly;
     shadowPipelineInfo.pViewportState = &viewportState;
     shadowPipelineInfo.pRasterizationState = &rasterization;
@@ -4041,6 +4086,13 @@ bool Graphics::renderNativeFrame() noexcept {
         impl_->lastError = "vkWaitForFences failed";
         return false;
     }
+    // The renderer currently records all passes into one primary command
+    // buffer, so a frame slot fence alone cannot protect it when two slots
+    // overlap. Serialize reuse until command buffers are allocated per slot.
+    if (vkQueueWaitIdle(impl_->queue) != VK_SUCCESS) {
+        impl_->lastError = "vkQueueWaitIdle before command buffer reuse failed";
+        return false;
+    }
 
     std::uint32_t imageIndex = 0;
     VkResult acquireResult = VK_ERROR_OUT_OF_DATE_KHR;
@@ -4267,6 +4319,20 @@ MeshHandle Graphics::createMesh(const MeshData& data) {
     if (data.vertices.empty() || data.indices.empty()) {
         impl_->setError("Mesh data must contain vertices and indices");
         return invalidMeshHandle;
+    }
+    for (std::uint32_t index : data.indices) {
+        if (index >= data.vertices.size()) {
+            impl_->setError("Mesh index references a vertex outside the vertex buffer");
+            return invalidMeshHandle;
+        }
+    }
+    for (const MeshVertex& vertex : data.vertices) {
+        for (float component : vertex.position) {
+            if (!std::isfinite(component)) {
+                impl_->setError("Mesh vertex position contains a non-finite value");
+                return invalidMeshHandle;
+            }
+        }
     }
     if (data.vertices.size() > std::numeric_limits<std::uint32_t>::max() ||
         data.indices.size() > std::numeric_limits<std::uint32_t>::max()) {

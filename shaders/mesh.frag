@@ -27,7 +27,7 @@ layout(location = 4) in vec4 fragClipPosition;   // main camera clip space
 layout(location = 0) out vec4 outColor;
 
 float shadowSample(vec2 uv, float depth, float compare) {
-    return depth - 0.0015 < texture(shadowMap, uv).r ? 1.0 : 0.0;
+    return depth - 0.0015 <= texture(shadowMap, uv).r ? 1.0 : 0.0;
 }
 
 float pcfShadow(vec3 normal) {
@@ -41,7 +41,7 @@ float pcfShadow(vec3 normal) {
     if (any(lessThan(projected.xy, vec2(0.0))) || any(greaterThan(projected.xy, vec2(1.0)))) {
         return 1.0;
     }
-    const float bias = max(0.0015 * (1.0 - dot(normal, scene.sunDirection.xyz)), 0.0005);
+    const float bias = max(0.0004 * (1.0 - dot(normal, scene.sunDirection.xyz)), 0.0001);
     const float depth = projected.z - bias;
     const float texel = scene.shadingParams.w;
     float lit = 0.0;
