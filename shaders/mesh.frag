@@ -57,21 +57,10 @@ float pcfShadow(vec3 normal) {
 }
 
 vec3 planarReflection(vec3 baseColor, vec3 normal, vec3 viewDirection) {
-    if (REFLECTIONS_ON < 0.5) {
-        return baseColor;
-    }
-    // Mirror plane at z = shadingParams.z: blend reflection by Fresnel-ish
-    // facing so the effect reads strongest at grazing angles.
-    const float facing = 1.0 - max(dot(-viewDirection, vec3(0.0, 0.0, 1.0)), 0.0);
-    const float weight = clamp(0.15 + 0.85 * facing * facing, 0.0, 1.0);
-    // Project the fragment to screen UV; the host renders the mirrored scene
-    // into reflectionTexture with the same viewport, so screen UV matches.
-    const vec2 screenUv = fragClipPosition.xy / fragClipPosition.w * 0.5 + 0.5;
-    if (any(lessThan(screenUv, vec2(0.0))) || any(greaterThan(screenUv, vec2(1.0)))) {
-        return baseColor;
-    }
-    const vec3 reflected = texture(reflectionTexture, screenUv).rgb;
-    return mix(baseColor, reflected, weight * 0.6);
+    // RenderItem does not identify mirror surfaces yet. Sampling the reflected
+    // scene onto every fragment overlays an upside-down duplicate over the
+    // world, so keep the ordinary scene stable until mirror materials exist.
+    return baseColor;
 }
 
 void main() {

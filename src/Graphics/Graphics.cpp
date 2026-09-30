@@ -1165,10 +1165,10 @@ struct Graphics::Impl {
         depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // Ends sampled: the mesh fragment shader reads it as DEPTH_READ_ONLY.
-        // Each pass re-renders the map, so the next pass's UNDEFINED
-        // initialLayout discards without needing a back-transition.
-        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+        // End in a combined read-only layout supported without enabling
+        // separateDepthStencilLayouts. Next frame discards with initialLayout
+        // UNDEFINED before rendering the map again.
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
         VkAttachmentReference depthReference{};
         depthReference.attachment = 0;
@@ -1458,7 +1458,7 @@ struct Graphics::Impl {
             VkDescriptorImageInfo shadowDescriptor{};
             shadowDescriptor.sampler = shadowSampler;
             shadowDescriptor.imageView = shadowView;
-            shadowDescriptor.imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+            shadowDescriptor.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
             std::array<VkWriteDescriptorSet, 4> writes{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = sceneDescriptorSets[slot];
@@ -2783,38 +2783,6 @@ struct Graphics::Impl {
 
         if (shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
             recordShadowPass();
-            // Mesh fragment shader samples the shadow map as DEPTH_READ_ONLY;
-            // next frame's shadow pass writes it again.
-            std::array<VkImageMemoryBarrier, 2> shadowBarriers{};
-            shadowBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            shadowBarriers[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            shadowBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            shadowBarriers[0].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            shadowBarriers[0].newLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-            shadowBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            shadowBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            shadowBarriers[0].image = shadowImage;
-            shadowBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-            shadowBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            shadowBarriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            shadowBarriers[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            shadowBarriers[1].oldLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-            shadowBarriers[1].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            shadowBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            shadowBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            shadowBarriers[1].image = shadowImage;
-            shadowBarriers[1].subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-            vkCmdPipelineBarrier(
-                commandBuffer,
-                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                0,
-                0,
-                nullptr,
-                0,
-                nullptr,
-                2,
-                shadowBarriers.data());
         }
 
         // Reflection pass: mirrored camera renders the scene into a smaller
