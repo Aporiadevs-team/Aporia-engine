@@ -207,6 +207,7 @@ if (APORIA_BUILD_RENDER_TESTS)
     add_subdirectory(tests/graphics/4 aporia-render-test-4)
     add_subdirectory(tests/graphics/5 aporia-render-test-5)
     add_subdirectory(tests/graphics/6 aporia-render-test-6)
+    add_subdirectory(tests/graphics/7 aporia-render-test-7)
 endif()
 
 if(APORIA_BUILD_VISIBLE_RENDER_TESTS)

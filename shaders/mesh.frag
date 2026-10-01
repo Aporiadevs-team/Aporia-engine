@@ -3,7 +3,7 @@
 // Mesh lighting: sun diffuse + shadows + reflection blend, output linear HDR.
 // Quality tiers arrive as specialization constants, so one pipeline serves
 // Low/Medium/High: PCF taps and reflection toggle compile per preset.
-layout(constant_id = 0) const int SHADOW_TAPS = 9;   // 1 Low, 9 Medium (3x3), 25 High (5x5)
+layout(constant_id = 0) const int SHADOW_TAPS = 9;   // 1 Low, 9 Medium (3x3), 49 High (7x7)
 layout(constant_id = 1) const float REFLECTIONS_ON = 1.0;
 
 layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
@@ -20,6 +20,7 @@ layout(set = 0, binding = 3) uniform SceneUniforms {
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragUv;
+layout(location = 5) in vec4 fragColor;
 layout(location = 2) in vec3 fragWorldPosition;
 layout(location = 3) in vec4 fragShadowPosition; // sun clip space
 layout(location = 4) in vec4 fragClipPosition;   // main camera clip space
@@ -27,25 +28,27 @@ layout(location = 4) in vec4 fragClipPosition;   // main camera clip space
 layout(location = 0) out vec4 outColor;
 
 float shadowSample(vec2 uv, float depth, float compare) {
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return 1.0;
+    }
     return depth - 0.0015 <= texture(shadowMap, uv).r ? 1.0 : 0.0;
 }
 
 float pcfShadow(vec3 normal) {
-    if (SHADOW_TAPS <= 1) {
-        return 1.0; // Low: plain lighting, no shadow lookup cost
-    }
     if (fragShadowPosition.w <= 0.0) {
         return 1.0; // behind the sun camera: outside the map, full light
     }
     vec3 projected = fragShadowPosition.xyz / fragShadowPosition.w;
+    // Vulkan clip-space XY is [-1, 1], while the shadow sampler uses [0, 1].
+    projected.xy = projected.xy * 0.5 + 0.5;
     if (any(lessThan(projected.xy, vec2(0.0))) || any(greaterThan(projected.xy, vec2(1.0)))) {
         return 1.0;
     }
-    const float bias = max(0.0004 * (1.0 - dot(normal, scene.sunDirection.xyz)), 0.0001);
+    const float bias = max(0.00025 * (1.0 - dot(normal, scene.sunDirection.xyz)), 0.00005);
     const float depth = projected.z - bias;
     const float texel = scene.shadingParams.w;
     float lit = 0.0;
-    const int radius = SHADOW_TAPS <= 9 ? 1 : 2;
+    const int radius = SHADOW_TAPS <= 1 ? 0 : (SHADOW_TAPS <= 9 ? 1 : 3);
     float total = 0.0;
     for (int dy = -radius; dy <= radius; ++dy) {
         for (int dx = -radius; dx <= radius; ++dx) {
@@ -64,7 +67,7 @@ vec3 planarReflection(vec3 baseColor, vec3 normal, vec3 viewDirection) {
 }
 
 void main() {
-    vec3 albedo = texture(albedoTexture, fragUv).rgb;
+    vec3 albedo = texture(albedoTexture, fragUv).rgb * fragColor.rgb;
     vec3 normal = normalize(fragNormal);
 
     float diffuse = max(dot(normal, scene.sunDirection.xyz), 0.0);
@@ -74,5 +77,5 @@ void main() {
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - fragWorldPosition);
     lit = planarReflection(lit, normal, viewDirection);
 
-    outColor = vec4(lit, 1.0); // linear HDR; tonemap pass converts to display
+    outColor = vec4(lit, fragColor.a); // linear HDR; tonemap pass converts to display
 }

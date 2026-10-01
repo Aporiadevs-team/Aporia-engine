@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Aporia {
@@ -105,6 +106,22 @@ struct EnvironmentState {
 struct RenderItem {
     std::uint64_t meshId = 0;
     float modelMatrix[16] = {};
+    float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    bool playerShadowCaster = false;
+};
+
+// Manual shadow controls. Presets provide defaults, then these fields can be
+// overridden independently for projects that need a specific shadow budget.
+struct ShadowConfig {
+    bool enabled = true;
+    std::uint32_t mapSize = 1024;
+    std::uint32_t cascadeCount = 1;
+    std::uint32_t passCount = 1;
+    std::uint32_t pcfRadius = 1;
+    float bias = 0.0004f;
+    float normalBias = 0.0001f;
+    float strength = 0.35f;
+    float distance = 30.0f;
 };
 
 // Abstract quality preset. One knob scales the whole picture: shadows, HDR,
@@ -121,6 +138,66 @@ enum class GraphicsQuality : std::uint8_t {
     High = 2,
 };
 
+enum class AntiAliasingMode : std::uint8_t {
+    None = 0,
+    SMAA = 1,
+    TAA = 2,
+};
+
+struct UiRect {
+    float x = 0.0f;
+    float y = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+};
+
+struct UiColor {
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    float a = 1.0f;
+};
+
+enum class BlurMode : std::uint8_t {
+    None = 0,
+    Kawase = 1,
+    Gaussian = 2,
+};
+
+struct BlurConfig {
+    BlurMode mode = BlurMode::None;
+    std::uint32_t iterations = 2;
+    float radius = 4.0f;
+    float intensity = 1.0f;
+};
+
+enum class UiTextAtlasMode : std::uint8_t {
+    TtfBitmap = 0,
+    Msdf = 1,
+};
+
+struct UiTextAtlasDesc {
+    TextureHandle texture;
+    UiTextAtlasMode mode = UiTextAtlasMode::Msdf;
+    float lineHeight = 16.0f;
+};
+
+struct UiTextRun {
+    std::string text;
+    float x = 0.0f;
+    float y = 0.0f;
+    float size = 16.0f;
+    UiColor color{};
+};
+
+struct UiDrawList {
+    std::vector<std::pair<UiRect, UiColor>> roundedRects;
+    std::vector<UiTextRun> textRuns;
+    UiTextAtlasDesc textAtlas{};
+    float cornerRadius = 0.0f;
+    BlurConfig blur{};
+};
+
 struct GraphicsConfig {
     bool headless = true;
     bool enableValidation = false;
@@ -129,6 +206,10 @@ struct GraphicsConfig {
     float sunDirection[3] = {0.35f, -0.5f, 0.8f}; // normalized on use; points toward the light
     float shadowExtent = 30.0f;                   // sun ortho half-extent around the camera (m)
     float mirrorZ = 0.0f;                         // planar reflection plane height (m)
+    ShadowConfig shadows{};
+    bool playerUltraShadows = false;
+    AntiAliasingMode antiAliasing = AntiAliasingMode::SMAA;
+    BlurConfig blur{};
 };
 
 struct GraphicsStats {
@@ -154,6 +235,7 @@ struct GraphicsStats {
     bool reflectionsEnabled = false;           // planar reflection pass active
     std::uint32_t shadowMapSize = 0;           // sun shadow map edge (px)
     std::uint32_t textureScalePercent = 100;   // texture auto-downscale (100 = native)
+    std::uint32_t antiAliasing = 1;             // AntiAliasingMode value
     double avgFrameMs = 0.0;                   // rolling CPU frame time average
 };
 
@@ -174,6 +256,10 @@ public:
 
     // Re-applies the quality preset (recreates quality targets in place).
     bool setQuality(GraphicsQuality quality);
+    void setShadowConfig(const ShadowConfig& config);
+    [[nodiscard]] ShadowConfig shadowConfig() const noexcept;
+    void enablePlayerUltraShadows(bool enabled) noexcept;
+    [[nodiscard]] bool playerUltraShadowsEnabled() const noexcept;
 
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] bool renderFrame() noexcept;
@@ -184,6 +270,11 @@ public:
 
     // Same as render() with scene environment (sun, mirror plane).
     bool render(const CameraState& camera, const EnvironmentState& environment, const std::vector<RenderItem>& items);
+
+    // Vulkan UI draw list. The backend owns the pass; callers only describe
+    // rectangles and text runs, so no GDI/OS drawing is involved.
+    void setUiDrawList(UiDrawList drawList);
+    void clearUiDrawList() noexcept;
 
     // Copies the last rendered headless color target into host memory (RGBA8,
     // renderWidth * renderHeight * 4 bytes). Native targets are not readable.

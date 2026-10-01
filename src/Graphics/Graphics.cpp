@@ -300,7 +300,7 @@ bool textureFormatInfo(
 // Quality preset parameter table: one place scales the whole picture.
 struct QualityParameters {
     std::uint32_t shadowMapSize;
-    int shadowTaps;          // specialization constant: 1, 9, 25
+    int shadowTaps;          // specialization constant: 1, 9, 49
     bool hdr;
     bool reflections;
     float reflectionScale;   // reflection target relative to main target
@@ -316,7 +316,7 @@ QualityParameters qualityParameters(Aporia::GraphicsQuality quality) noexcept {
         return {1024, 9, true, true, 0.5f, 0.35f, 75};
     case Aporia::GraphicsQuality::High:
     default:
-        return {2048, 25, true, true, 1.0f, 0.25f, 100};
+        return {4096, 49, true, true, 1.0f, 0.25f, 100};
     }
 }
 
@@ -436,6 +436,8 @@ struct Graphics::Impl {
     // in PRESENT_SRC_KHR in windowed mode, which cannot be sampled.
     VkRenderPass reflectRenderPass = VK_NULL_HANDLE;
     std::uint32_t shadowMapSize = 0;
+    Aporia::ShadowConfig shadowConfig{};
+    bool playerUltraShadows = false;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipelineLayout tonemapPipelineLayout = VK_NULL_HANDLE;
     VkShaderModule tonemapVertexShader = VK_NULL_HANDLE;
@@ -444,6 +446,7 @@ struct Graphics::Impl {
     VkDescriptorSetLayout tonemapDescriptorLayout = VK_NULL_HANDLE;
     VkDescriptorSet tonemapDescriptorSet = VK_NULL_HANDLE;
     bool hdrEnabled = false;
+    std::uint32_t antiAliasing = 1;
     bool reflectionsEnabled = false;
     int shadowTaps = 9;
     float reflectionScale = 0.0f;
@@ -451,6 +454,8 @@ struct Graphics::Impl {
     std::uint32_t textureScalePercent = 100;
     double avgFrameMs = 0.0;
     Aporia::EnvironmentState environment{};
+    Aporia::UiDrawList uiDrawList{};
+    Aporia::BlurConfig blurConfig{};
 
     VkImage depthImage = VK_NULL_HANDLE;
     VkDeviceMemory depthMemory = VK_NULL_HANDLE;
@@ -474,6 +479,14 @@ struct Graphics::Impl {
     struct PushConstants {
         float viewProj[16];
         float model[16];
+        float color[4];
+    };
+    struct UiPushConstants {
+        float rect[4];
+        float color[4];
+        float radius[4];
+        float smoothing[4];
+        float blur[4];
     };
 
     // Column-major 4x4 multiply: out = a * b (a, b, out are float[16]).
@@ -601,6 +614,11 @@ struct Graphics::Impl {
         reflectionScale = parameters.reflectionScale;
         shadowStrength = parameters.shadowStrength;
         textureScalePercent = parameters.textureScalePercent;
+        shadowConfig.mapSize = parameters.shadowMapSize;
+        shadowConfig.cascadeCount = 1;
+        shadowConfig.passCount = 1;
+        shadowConfig.pcfRadius = parameters.shadowTaps <= 1 ? 0u : parameters.shadowTaps <= 9 ? 1u : 3u;
+        shadowConfig.strength = parameters.shadowStrength;
         activeQuality = quality;
     }
 
@@ -2024,11 +2042,27 @@ struct Graphics::Impl {
             pendingCamera.position[0],
             pendingCamera.position[1],
             pendingCamera.position[2]);
-        const Vec3 center = cameraPosition;
-        const Vec3 eye = center + sunDirection * 60.0;
+        Vec3 center = cameraPosition;
         const Vec3 up = std::abs(directionZ) < 0.9f ? Vec3(0.0, 0.0, 1.0) : Vec3(1.0, 0.0, 0.0);
-        const Mat4 view = Mat4::lookAt(eye, center, up);
+        // Stabilize the shadow projection: snap its light-space center to the
+        // shadow texel grid so camera motion does not make the entire shadow
+        // map swim by a fraction of a texel every frame.
+        const Vec3 lightEye = center + sunDirection * 60.0;
+        const Mat4 unsnappedView = Mat4::lookAt(lightEye, center, up);
+        const Vec3 right{unsnappedView.m[0][0], unsnappedView.m[1][0], unsnappedView.m[2][0]};
+        const Vec3 correctedUp{unsnappedView.m[0][1], unsnappedView.m[1][1], unsnappedView.m[2][1]};
+        const Vec3 offset = center - lightEye;
+        const double lightX = dot(right, offset);
+        const double lightY = dot(correctedUp, offset);
         const double extent = std::max(1.0, static_cast<double>(shadowExtent));
+        const double texelWorldSize = (extent * 2.0) / static_cast<double>(std::max(1u, shadowMapSize));
+        if (texelWorldSize > 0.0) {
+            const double snappedX = std::round(lightX / texelWorldSize) * texelWorldSize;
+            const double snappedY = std::round(lightY / texelWorldSize) * texelWorldSize;
+            center += right * (snappedX - lightX) + correctedUp * (snappedY - lightY);
+        }
+        const Vec3 eye = center + sunDirection * 60.0;
+        const Mat4 view = Mat4::lookAt(eye, center, up);
         const Mat4 projection = Mat4::orthographicVulkan(extent * 2.0, extent * 2.0, 0.1, 200.0);
         const Mat4 sunViewProj = projection * view;
         std::memcpy(outMatrix, &sunViewProj, sizeof(sunViewProj));
@@ -2669,6 +2703,7 @@ struct Graphics::Impl {
                 continue;
             }
             std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
+            std::memcpy(push.color, item.color, sizeof(push.color));
             vkCmdPushConstants(
                 commandBuffer,
                 meshPipelineLayout,
@@ -2785,6 +2820,28 @@ struct Graphics::Impl {
             &tonemapDescriptorSet,
             0,
             nullptr);
+        UiPushConstants ui{};
+        if (!uiDrawList.roundedRects.empty()) {
+            const auto& item = uiDrawList.roundedRects.front();
+            ui.rect[0] = item.first.x;
+            ui.rect[1] = item.first.y;
+            ui.rect[2] = item.first.width;
+            ui.rect[3] = item.first.height;
+            ui.color[0] = item.second.r;
+            ui.color[1] = item.second.g;
+            ui.color[2] = item.second.b;
+            ui.color[3] = item.second.a;
+            ui.radius[0] = uiDrawList.cornerRadius;
+            ui.radius[1] = uiDrawList.cornerRadius;
+            ui.radius[2] = uiDrawList.cornerRadius;
+            ui.radius[3] = uiDrawList.cornerRadius;
+            ui.smoothing[0] = 1.0f;
+            ui.blur[0] = static_cast<float>(uiDrawList.blur.mode);
+            ui.blur[1] = uiDrawList.blur.radius;
+            ui.blur[2] = uiDrawList.blur.intensity;
+        }
+        vkCmdPushConstants(commandBuffer, tonemapPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(ui), &ui);
         vkCmdDraw(commandBuffer, 4, 1, 0, 0);
         vkCmdEndRenderPass(commandBuffer);
     }
@@ -3159,6 +3216,17 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->environment.mirrorZ = config.mirrorZ;
     impl_->shadowExtent = config.shadowExtent;
     impl_->applyQualityPreset(config.quality);
+    impl_->antiAliasing = static_cast<std::uint32_t>(config.antiAliasing);
+    impl_->blurConfig = config.blur;
+    impl_->shadowConfig = config.shadows;
+    impl_->shadowConfig.mapSize = std::max(1u, config.shadows.mapSize);
+    impl_->shadowConfig.cascadeCount = std::max(1u, config.shadows.cascadeCount);
+    impl_->shadowConfig.passCount = std::max(1u, config.shadows.passCount);
+    impl_->shadowConfig.pcfRadius = std::min(8u, config.shadows.pcfRadius);
+    impl_->playerUltraShadows = config.playerUltraShadows;
+    impl_->shadowMapSize = impl_->shadowConfig.mapSize;
+    impl_->shadowTaps = static_cast<int>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
+    impl_->shadowStrength = impl_->shadowConfig.strength;
 
     struct InitializationGuard {
         Impl* impl = nullptr;
@@ -3896,6 +3964,12 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     tonemapPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     tonemapPipelineLayoutInfo.setLayoutCount = 1;
     tonemapPipelineLayoutInfo.pSetLayouts = &impl_->tonemapDescriptorLayout;
+    VkPushConstantRange tonemapPushRange{};
+    tonemapPushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    tonemapPushRange.offset = 0;
+    tonemapPushRange.size = sizeof(Impl::UiPushConstants);
+    tonemapPipelineLayoutInfo.pushConstantRangeCount = 1;
+    tonemapPipelineLayoutInfo.pPushConstantRanges = &tonemapPushRange;
     if (vkCreatePipelineLayout(impl_->device, &tonemapPipelineLayoutInfo, nullptr, &impl_->tonemapPipelineLayout) != VK_SUCCESS) {
         impl_->setError("vkCreatePipelineLayout(tonemap) failed");
         shutdown();
@@ -3924,6 +3998,17 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     tonemapStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     tonemapStages[1].module = impl_->tonemapFragmentShader;
     tonemapStages[1].pName = "main";
+    VkSpecializationMapEntry aaEntry{};
+    aaEntry.constantID = 0;
+    aaEntry.offset = 0;
+    aaEntry.size = sizeof(std::int32_t);
+    const std::int32_t aaMode = static_cast<std::int32_t>(impl_->antiAliasing);
+    VkSpecializationInfo aaSpecialization{};
+    aaSpecialization.mapEntryCount = 1;
+    aaSpecialization.pMapEntries = &aaEntry;
+    aaSpecialization.dataSize = sizeof(aaMode);
+    aaSpecialization.pData = &aaMode;
+    tonemapStages[1].pSpecializationInfo = &aaSpecialization;
 
     VkPipelineVertexInputStateCreateInfo emptyVertexInput{};
     emptyVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -3981,6 +4066,49 @@ bool Graphics::setQuality(GraphicsQuality quality) {
     }
     impl_->applyQualityPreset(quality);
     return impl_->rebuildQualityTargets();
+}
+
+void Graphics::setShadowConfig(const ShadowConfig& config) {
+    if (!impl_) {
+        return;
+    }
+    impl_->shadowConfig = config;
+    impl_->shadowConfig.mapSize = std::max(1u, config.mapSize);
+    impl_->shadowConfig.cascadeCount = std::max(1u, config.cascadeCount);
+    impl_->shadowConfig.passCount = std::max(1u, config.passCount);
+    impl_->shadowConfig.pcfRadius = std::min(8u, config.pcfRadius);
+    impl_->shadowMapSize = impl_->shadowConfig.mapSize;
+    impl_->shadowTaps = static_cast<int>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
+    impl_->shadowStrength = impl_->shadowConfig.strength;
+    if (initialized()) {
+        impl_->rebuildQualityTargets();
+    }
+}
+
+ShadowConfig Graphics::shadowConfig() const noexcept {
+    return impl_ ? impl_->shadowConfig : ShadowConfig{};
+}
+
+void Graphics::enablePlayerUltraShadows(bool enabled) noexcept {
+    if (impl_) {
+        impl_->playerUltraShadows = enabled;
+    }
+}
+
+void Graphics::setUiDrawList(UiDrawList drawList) {
+    if (impl_) {
+        impl_->uiDrawList = std::move(drawList);
+    }
+}
+
+void Graphics::clearUiDrawList() noexcept {
+    if (impl_) {
+        impl_->uiDrawList = {};
+    }
+}
+
+bool Graphics::playerUltraShadowsEnabled() const noexcept {
+    return impl_ != nullptr && impl_->playerUltraShadows;
 }
 
 bool Graphics::initialized() const noexcept {
@@ -4612,6 +4740,7 @@ GraphicsStats Graphics::stats() const noexcept {
     result.reflectionsEnabled = impl_->reflectionsEnabled;
     result.shadowMapSize = impl_->shadowMapSize;
     result.textureScalePercent = impl_->textureScalePercent;
+    result.antiAliasing = impl_->antiAliasing;
     result.avgFrameMs = impl_->avgFrameMs;
     for (std::uint32_t heap = 0; heap < impl_->memoryProperties.memoryHeapCount; ++heap) {
         if ((impl_->memoryProperties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {

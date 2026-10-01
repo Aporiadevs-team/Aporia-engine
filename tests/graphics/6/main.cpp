@@ -96,7 +96,7 @@ int main() {
     const std::vector<Aporia::RenderItem> items{groundItem, boxItem};
 
     const char* presetNames[] = {"Low", "Medium", "High"};
-    const std::uint32_t expectedShadowSizes[] = {512, 1024, 2048};
+    const std::uint32_t expectedShadowSizes[] = {512, 1024, 4096};
     const bool expectedHdr[] = {false, true, true};
     const bool expectedReflections[] = {false, true, true};
     const std::uint32_t expectedTextureScale[] = {50, 75, 100};
