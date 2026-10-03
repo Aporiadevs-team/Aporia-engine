@@ -1611,6 +1611,39 @@ struct Graphics::Impl {
 
 
     // Fullscreen tonemap/copy pass from the HDR target into `target`.
+    void renderUiText(VkCommandBuffer buffer, std::uint32_t width, std::uint32_t height) {
+        if (!textRenderer.initialized() || uiDrawList.textRuns.empty()) {
+            return;
+        }
+        const auto textureIt = textures.find(uiDrawList.textAtlas.texture.value());
+        if (textureIt == textures.end() || textureIt->second.view == VK_NULL_HANDLE) {
+            return;
+        }
+        graphics_internal::TextRenderer::AtlasTexture atlasTexture;
+        atlasTexture.view = textureIt->second.view;
+        atlasTexture.sampler = textureIt->second.sampler;
+        atlasTexture.width = static_cast<float>(textureIt->second.width);
+        atlasTexture.height = static_cast<float>(textureIt->second.height);
+        atlasTexture.distanceRange = uiDrawList.textAtlas.distanceRange;
+        atlasTexture.fontSize = uiDrawList.textAtlas.emSize;
+        textRenderer.setMode(uiDrawList.textAtlas.mode == UiTextAtlasMode::TtfBitmap
+            ? graphics_internal::TextRenderer::Mode::Ttf
+            : graphics_internal::TextRenderer::Mode::Msdf);
+        textRenderer.setAtlasTexture(atlasTexture);
+
+        for (const UiTextRun& run : uiDrawList.textRuns) {
+            const graphics_internal::TextColor color{run.color.r, run.color.g, run.color.b, run.color.a};
+            const graphics_internal::TextColor outline{
+                run.outlineColor.r, run.outlineColor.g, run.outlineColor.b, run.outlineColor.a};
+            const std::vector<graphics_internal::TextGlyph> glyphs = textRenderer.layoutText(
+                uiDrawList.textAtlas, run.text, run.x, run.y, run.size, color,
+                run.outlineWidth, outline);
+            textRenderer.renderText(buffer, currentFrameSlot,
+                                    static_cast<float>(width), static_cast<float>(height),
+                                    1.0f, run.outlineWidth, outline, glyphs);
+        }
+    }
+
     void renderTonemap(VkFramebuffer target, std::uint32_t width, std::uint32_t height) {
         graphics_internal::HdrRenderer::TonemapContext context;
         context.commandBuffer = commandBuffer;
@@ -1622,6 +1655,7 @@ struct Graphics::Impl {
             context, target, width, height,
             [this, width, height](VkCommandBuffer buffer, VkPipelineLayout layout) {
                 rectRenderer.draw(buffer, layout, width, height);
+                renderUiText(buffer, width, height);
             });
     }
 
@@ -1763,6 +1797,8 @@ struct Graphics::Impl {
         if (device != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device);
         }
+
+        textRenderer.destroy();
 
         if (device != VK_NULL_HANDLE) {
             if (pipeline != VK_NULL_HANDLE) {
@@ -2676,9 +2712,22 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         return false;
     }
 
+    graphics_internal::TextRenderer::Context textContext;
+    textContext.device = impl_->device;
+    textContext.physicalDevice = impl_->physicalDevice;
+    textContext.memoryProperties = impl_->memoryProperties;
+    textContext.renderPass = impl_->renderPass;
+    textContext.shaderDirectory = shaderDirectory;
+    if (!impl_->textRenderer.initialize(textContext)) {
+        impl_->setError("Text renderer initialization failed");
+        shutdown();
+        return false;
+    }
+
     guard.committed = true;
     return true;
 }
+
 
 void Graphics::shutdown() noexcept {
     if (impl_) {

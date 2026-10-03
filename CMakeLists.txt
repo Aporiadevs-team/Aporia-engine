@@ -57,6 +57,7 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
         src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp
         src/Graphics/GlobalDrawer/Hdr/HdrRenderer.cpp
+        src/Graphics/GlobalDrawer/Text/TextRenderer.cpp
         src/Graphics/TextureManager/TextureManager.cpp)
 endif()
 
@@ -73,6 +74,9 @@ if(APORIA_ENABLE_GRAPHICS)
     set(APORIA_VULKAN_SHADOW_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/shadow.frag.spv")
     set(APORIA_VULKAN_TONEMAP_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/tonemap.vert.spv")
     set(APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/tonemap.frag.spv")
+    set(APORIA_VULKAN_TEXT_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/text.vert.spv")
+    set(APORIA_VULKAN_TEXT_MSDF_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/text_msdf.frag.spv")
+    set(APORIA_VULKAN_TEXT_TTF_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/text_ttf.frag.spv")
 
     add_custom_command(
         OUTPUT "${APORIA_VULKAN_VERTEX_SHADER}"
@@ -138,6 +142,30 @@ if(APORIA_ENABLE_GRAPHICS)
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tonemap.frag"
         VERBATIM
     )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_TEXT_VERTEX_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert"
+            -o "${APORIA_VULKAN_TEXT_VERTEX_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_TEXT_MSDF_FRAGMENT_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.frag"
+            -o "${APORIA_VULKAN_TEXT_MSDF_FRAGMENT_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.frag"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_TEXT_TTF_FRAGMENT_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_ttf.frag"
+            -o "${APORIA_VULKAN_TEXT_TTF_FRAGMENT_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_ttf.frag"
+        VERBATIM
+    )
     add_custom_target(AporiaVulkanShaders DEPENDS
         "${APORIA_VULKAN_VERTEX_SHADER}"
         "${APORIA_VULKAN_FRAGMENT_SHADER}"
@@ -147,6 +175,9 @@ if(APORIA_ENABLE_GRAPHICS)
         "${APORIA_VULKAN_SHADOW_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_TONEMAP_VERTEX_SHADER}"
         "${APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER}"
+        "${APORIA_VULKAN_TEXT_VERTEX_SHADER}"
+        "${APORIA_VULKAN_TEXT_MSDF_FRAGMENT_SHADER}"
+        "${APORIA_VULKAN_TEXT_TTF_FRAGMENT_SHADER}"
     )
 endif()
 
