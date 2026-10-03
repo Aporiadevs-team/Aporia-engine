@@ -110,6 +110,12 @@ struct RenderItem {
     bool playerShadowCaster = false;
 };
 
+enum class ShadowFilter : std::uint8_t {
+    Pcf = 0,
+    Pcss = 1,
+    Evsm = 2,
+};
+
 // Manual shadow controls. Presets provide defaults, then these fields can be
 // overridden independently for projects that need a specific shadow budget.
 struct ShadowConfig {
@@ -122,6 +128,12 @@ struct ShadowConfig {
     float normalBias = 0.0001f;
     float strength = 0.35f;
     float distance = 30.0f;
+    ShadowFilter filter = ShadowFilter::Pcf;
+    std::uint32_t blockerSamples = 16;
+    std::uint32_t filterSamples = 32;
+    bool contactShadows = false;
+    float contactDistance = 2.0f;
+    float cascadeSplitLambda = 0.75f;
 };
 
 // Abstract quality preset. One knob scales the whole picture: shadows, HDR,

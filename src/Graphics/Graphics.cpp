@@ -37,7 +37,12 @@
 // Frame-level diagnostics: set APORIA_GRAPHICS_DEBUG=1 to trace acquire/extent/present.
 namespace {
 bool graphicsDebugEnabled() {
-    static const bool enabled = std::getenv("APORIA_GRAPHICS_DEBUG") != nullptr;
+    char* value = nullptr;
+    std::size_t valueLength = 0;
+    static const bool enabled = _dupenv_s(&value, &valueLength, "APORIA_GRAPHICS_DEBUG") == 0 && value != nullptr;
+    if (value != nullptr) {
+        std::free(value);
+    }
     return enabled;
 }
 
@@ -311,12 +316,12 @@ struct QualityParameters {
 QualityParameters qualityParameters(Aporia::GraphicsQuality quality) noexcept {
     switch (quality) {
     case Aporia::GraphicsQuality::Low:
-        return {512, 1, false, false, 0.0f, 0.55f, 50};
+        return {512, 1, false, false, 0.0f, 0.22f, 50};
     case Aporia::GraphicsQuality::Medium:
-        return {1024, 9, true, true, 0.5f, 0.35f, 75};
+        return {1024, 9, true, true, 0.5f, 0.16f, 75};
     case Aporia::GraphicsQuality::High:
     default:
-        return {4096, 49, true, true, 1.0f, 0.25f, 100};
+        return {4096, 49, true, true, 1.0f, 0.10f, 100};
     }
 }
 
@@ -587,8 +592,9 @@ struct Graphics::Impl {
         float cameraPosition[4];
         float shadingParams[4];
         float screenParams[4];
+        float shadowParams[4];
     };
-    static_assert(sizeof(SceneUniforms) == 128, "SceneUniforms must stay one 128-byte block");
+    static_assert(sizeof(SceneUniforms) == 144, "SceneUniforms must stay one 144-byte block");
 
     VkPhysicalDeviceMemoryProperties memoryProperties{};
     VkFormat colorFormat = VK_FORMAT_UNDEFINED;
@@ -619,6 +625,9 @@ struct Graphics::Impl {
         shadowConfig.passCount = 1;
         shadowConfig.pcfRadius = parameters.shadowTaps <= 1 ? 0u : parameters.shadowTaps <= 9 ? 1u : 3u;
         shadowConfig.strength = parameters.shadowStrength;
+        shadowConfig.filter = quality == Aporia::GraphicsQuality::High ? Aporia::ShadowFilter::Pcss : Aporia::ShadowFilter::Pcf;
+        shadowConfig.contactShadows = quality != Aporia::GraphicsQuality::Low;
+        shadowConfig.contactDistance = quality == Aporia::GraphicsQuality::High ? 3.0f : 1.5f;
         activeQuality = quality;
     }
 
@@ -2091,6 +2100,10 @@ struct Graphics::Impl {
         uniforms.shadingParams[3] = shadowMapSize > 0 ? 1.0f / static_cast<float>(shadowMapSize) : 0.0f;
         uniforms.screenParams[0] = static_cast<float>(hdrEnabled ? hdrWidth : (headless ? renderWidth : swapchainExtent.width));
         uniforms.screenParams[1] = static_cast<float>(hdrEnabled ? hdrHeight : (headless ? renderHeight : swapchainExtent.height));
+        uniforms.shadowParams[0] = static_cast<float>(shadowConfig.filter);
+        uniforms.shadowParams[1] = static_cast<float>(shadowConfig.blockerSamples);
+        uniforms.shadowParams[2] = static_cast<float>(shadowConfig.filterSamples);
+        uniforms.shadowParams[3] = shadowConfig.contactShadows ? shadowConfig.contactDistance : 0.0f;
         std::memcpy(mapped, &uniforms, sizeof(uniforms));
         vkUnmapMemory(device, sceneUniformMemory[slot]);
     }

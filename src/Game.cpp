@@ -70,7 +70,9 @@ Body Game::createBody(const BodyDesc& description) {
     MeshData meshData;
     switch (description.meshKind) {
     case MeshKind::Box:
-        meshData = apr::makeBoxMesh(description.halfExtents.x, description.halfExtents.y, description.halfExtents.z);
+        meshData = apr::makeBoxMesh(static_cast<float>(description.halfExtents.x),
+                                    static_cast<float>(description.halfExtents.y),
+                                    static_cast<float>(description.halfExtents.z));
         break;
     case MeshKind::Sphere:
         meshData = apr::makeSphereMesh(description.sphereRadius);

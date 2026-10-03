@@ -23,6 +23,7 @@ layout(set = 0, binding = 3) uniform SceneUniforms {
     vec4 cameraPosition;
     vec4 shadingParams;
     vec4 screenParams;
+    vec4 shadowParams;
 } scene;
 
 void main() {

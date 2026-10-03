@@ -664,12 +664,14 @@ struct CityWorld::Impl {
                     const float y0 = static_cast<float>(spot.y - spot.halfY);
                     const float y1 = static_cast<float>(spot.y + spot.halfY);
                     if (spot.district == 0 && spot.height > 28.0f) {
-                        float hx = spot.halfX;
-                        float hy = spot.halfY;
+                        float hx = static_cast<float>(spot.halfX);
+                        float hy = static_cast<float>(spot.halfY);
                         float zLow = 0.0f;
                         for (float tier = 0; tier < 3.0f; ++tier) {
                             const float zHigh = spot.height * (tier + 1.0f) / 3.0f;
-                            pushBox(mesh, spot.x - hx, spot.y - hy, spot.x + hx, spot.y + hy, zLow, zHigh, uWall, kRoof);
+                            pushBox(mesh, static_cast<float>(spot.x) - hx, static_cast<float>(spot.y) - hy,
+                                    static_cast<float>(spot.x) + hx, static_cast<float>(spot.y) + hy,
+                                    zLow, zHigh, uWall, kRoof);
                             zLow = zHigh;
                             hx *= 0.7f;
                             hy *= 0.7f;
