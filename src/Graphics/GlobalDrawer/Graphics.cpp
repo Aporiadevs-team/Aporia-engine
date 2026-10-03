@@ -8,6 +8,13 @@
 #endif
 
 #include "Aporia/Graphics/Graphics.hpp"
+#include "Device/Device.hpp"
+#include "Hdr/HdrRenderer.hpp"
+#include "Meshes/MeshRenderer.hpp"
+#include "Rectangulars/RectRenderer.hpp"
+#include "Shadows/ShadowRenderer.hpp"
+#include "Text/TextRenderer.hpp"
+#include "../TextureManager/TextureManager.hpp"
 #include "Aporia/Graphics/MeshPrimitives.hpp"
 #include "Aporia/Math/Matrix4.hpp"
 
@@ -92,64 +99,6 @@ namespace {
 
 constexpr std::uint32_t renderWidth = 64;
 constexpr std::uint32_t renderHeight = 64;
-
-VKAPI_ATTR VkBool32 VKAPI_CALL validationCallback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-    VkDebugUtilsMessageTypeFlagsEXT,
-    const VkDebugUtilsMessengerCallbackDataEXT* data,
-    void* userData) {
-    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0 ||
-        (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0) {
-        if (userData != nullptr) {
-            ++(*static_cast<std::uint32_t*>(userData));
-        }
-        std::fprintf(
-            stderr,
-            "[Aporia validation] %s: %s\n",
-            (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0 ? "ERROR" : "WARN",
-            data != nullptr && data->pMessage != nullptr ? data->pMessage : "<no message>");
-        std::fflush(stderr);
-    }
-    return VK_FALSE;
-}
-
-bool hasLayer(const char* name) {
-    std::uint32_t count = 0;
-    if (vkEnumerateInstanceLayerProperties(&count, nullptr) != VK_SUCCESS || count == 0) {
-        return false;
-    }
-
-    std::vector<VkLayerProperties> layers(count);
-    if (vkEnumerateInstanceLayerProperties(&count, layers.data()) != VK_SUCCESS) {
-        return false;
-    }
-
-    for (const VkLayerProperties& layer : layers) {
-        if (std::string(layer.layerName) == name) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool hasInstanceExtension(const char* name) {
-    std::uint32_t count = 0;
-    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) != VK_SUCCESS || count == 0) {
-        return false;
-    }
-
-    std::vector<VkExtensionProperties> extensions(count);
-    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, extensions.data()) != VK_SUCCESS) {
-        return false;
-    }
-
-    for (const VkExtensionProperties& extension : extensions) {
-        if (std::string(extension.extensionName) == name) {
-            return true;
-        }
-    }
-    return false;
-}
 
 bool findMemoryType(
     const VkPhysicalDeviceMemoryProperties& properties,
@@ -353,6 +302,13 @@ void reflectPoint(double mirrorZ, double& x, double& y, double& z) noexcept {
 namespace Aporia {
 
 struct Graphics::Impl {
+    graphics_internal::Device deviceService;
+    graphics_internal::MeshRenderer meshRenderer;
+    graphics_internal::ShadowRenderer shadowRenderer;
+    graphics_internal::HdrRenderer hdrRenderer;
+    graphics_internal::TextRenderer textRenderer;
+    graphics_internal::RectRenderer rectRenderer;
+    graphics_internal::TextureManager textureManager;
     VkInstance instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
     PFN_vkDestroyDebugUtilsMessengerEXT destroyDebugMessenger = nullptr;
@@ -400,11 +356,9 @@ struct Graphics::Impl {
     // Per-frame-in-flight presentation synchronization: each frame slot owns
     // its acquire/render-finished semaphores and a GPU fence, so a fast host
     // never reuses GPU objects still pending from the previous frame.
-    static constexpr std::uint32_t maxFramesInFlight = 2;
+    static constexpr std::uint32_t maxFramesInFlight = graphics_internal::Device::MaxFramesInFlight;
+    graphics_internal::Device::FrameSync frameSync;
     std::uint32_t currentFrameSlot = 0;
-    VkSemaphore acquireSemaphores[maxFramesInFlight] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkSemaphore renderFinishedSemaphores[maxFramesInFlight] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkFence frameFences[maxFramesInFlight] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkSemaphore acquireSemaphore = VK_NULL_HANDLE; // legacy single-slot, headless path
     VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
 
@@ -430,13 +384,8 @@ struct Graphics::Impl {
     VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
     VkShaderModule shadowVertexShader = VK_NULL_HANDLE;
     VkShaderModule shadowFragmentShader = VK_NULL_HANDLE;
-    VkImage shadowImage = VK_NULL_HANDLE;
-    VkDeviceMemory shadowMemory = VK_NULL_HANDLE;
-    VkImageView shadowView = VK_NULL_HANDLE;
-    VkSampler shadowSampler = VK_NULL_HANDLE;
+    graphics_internal::ShadowRenderer::Resources shadow;
     VkSampler reflectSampler = VK_NULL_HANDLE;
-    VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
-    VkFramebuffer shadowFramebuffer = VK_NULL_HANDLE;
     // Reflection target needs its own render pass: the shared main pass ends
     // in PRESENT_SRC_KHR in windowed mode, which cannot be sampled.
     VkRenderPass reflectRenderPass = VK_NULL_HANDLE;
@@ -472,26 +421,12 @@ struct Graphics::Impl {
     std::vector<VkDeviceMemory> swapchainDepthMemory;
     std::vector<VkImage> swapchainDepthImages;
 
-    struct MeshResource {
-        VkBuffer vertexBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
-        VkBuffer indexBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory indexMemory = VK_NULL_HANDLE;
-        std::uint32_t vertexCount = 0;
-        std::uint32_t indexCount = 0;
-    };
+    using MeshResource = graphics_internal::MeshRenderer::Resource;
 
     struct PushConstants {
         float viewProj[16];
         float model[16];
         float color[4];
-    };
-    struct UiPushConstants {
-        float rect[4];
-        float color[4];
-        float radius[4];
-        float smoothing[4];
-        float blur[4];
     };
 
     // Column-major 4x4 multiply: out = a * b (a, b, out are float[16]).
@@ -542,16 +477,7 @@ struct Graphics::Impl {
         return view;
     }
 
-    struct TextureResource {
-        VkImage image = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        VkImageView view = VK_NULL_HANDLE;
-        VkSampler sampler = VK_NULL_HANDLE;
-        VkFormat format = VK_FORMAT_UNDEFINED;
-        std::uint32_t width = 0;
-        std::uint32_t height = 0;
-        std::size_t dataSize = 0;
-    };
+    using TextureResource = graphics_internal::TextureManager::Resource;
 
     std::unordered_map<std::uint64_t, TextureResource> textures;
     TextureHandle defaultTexture;
@@ -629,28 +555,12 @@ struct Graphics::Impl {
         shadowConfig.contactShadows = quality != Aporia::GraphicsQuality::Low;
         shadowConfig.contactDistance = quality == Aporia::GraphicsQuality::High ? 3.0f : 1.5f;
         activeQuality = quality;
+        hdrRenderer.setQuality(quality);
+        shadowRenderer.setConfig(shadowConfig);
     }
 
     Aporia::GraphicsQuality activeQuality = Aporia::GraphicsQuality::Medium;
     float shadowExtent = 30.0f;
-
-    void destroyTextureResource(TextureResource& texture) noexcept {
-        if (device != VK_NULL_HANDLE) {
-            if (texture.sampler != VK_NULL_HANDLE) {
-                vkDestroySampler(device, texture.sampler, nullptr);
-            }
-            if (texture.view != VK_NULL_HANDLE) {
-                vkDestroyImageView(device, texture.view, nullptr);
-            }
-            if (texture.image != VK_NULL_HANDLE) {
-                vkDestroyImage(device, texture.image, nullptr);
-            }
-            if (texture.memory != VK_NULL_HANDLE) {
-                vkFreeMemory(device, texture.memory, nullptr);
-            }
-        }
-        texture = TextureResource{};
-    }
 
     bool createBufferWithData(
         VkDeviceSize size,
@@ -658,184 +568,19 @@ struct Graphics::Impl {
         VkBufferUsageFlags usage,
         VkBuffer& buffer,
         VkDeviceMemory& memory) {
-        buffer = VK_NULL_HANDLE;
-        memory = VK_NULL_HANDLE;
-        if (size == 0 || data == nullptr) {
-            setError("Buffer upload data is empty");
-            return false;
-        }
-
-        VkBuffer stagingBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-        auto destroyStaging = [&]() noexcept {
-            if (stagingBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(device, stagingBuffer, nullptr);
-            }
-            if (stagingMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(device, stagingMemory, nullptr);
-            }
-        };
-
-        VkBufferCreateInfo stagingInfo{};
-        stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        stagingInfo.size = size;
-        stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device, &stagingInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
-            setError("vkCreateBuffer(staging) failed");
-            return false;
-        }
-
-        VkMemoryRequirements stagingRequirements{};
-        vkGetBufferMemoryRequirements(device, stagingBuffer, &stagingRequirements);
-        std::uint32_t stagingType = 0;
-        if (!findMemoryType(
-                memoryProperties,
-                stagingRequirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                stagingType)) {
-            destroyStaging();
-            setError("No host-visible memory for staging buffer");
-            return false;
-        }
-
-        VkMemoryAllocateInfo stagingAllocate{};
-        stagingAllocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        stagingAllocate.allocationSize = stagingRequirements.size;
-        stagingAllocate.memoryTypeIndex = stagingType;
-        if (vkAllocateMemory(device, &stagingAllocate, nullptr, &stagingMemory) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkAllocateMemory(staging) failed");
-            return false;
-        }
-        if (vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkBindBufferMemory(staging) failed");
-            return false;
-        }
-
-        void* mapped = nullptr;
-        if (vkMapMemory(device, stagingMemory, 0, size, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
-            destroyStaging();
-            setError("vkMapMemory(staging) failed");
-            return false;
-        }
-        std::memcpy(mapped, data, static_cast<std::size_t>(size));
-        vkUnmapMemory(device, stagingMemory);
-
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = size;
-        bufferInfo.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkCreateBuffer(device local) failed");
-            return false;
-        }
-
-        VkMemoryRequirements bufferRequirements{};
-        vkGetBufferMemoryRequirements(device, buffer, &bufferRequirements);
-        std::uint32_t bufferType = 0;
-        if (!findMemoryType(memoryProperties, bufferRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, bufferType)) {
-            destroyStaging();
-            setError("No device-local memory for buffer");
-            return false;
-        }
-
-        VkMemoryAllocateInfo bufferAllocate{};
-        bufferAllocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        bufferAllocate.allocationSize = bufferRequirements.size;
-        bufferAllocate.memoryTypeIndex = bufferType;
-        if (vkAllocateMemory(device, &bufferAllocate, nullptr, &memory) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkAllocateMemory(device local) failed");
-            return false;
-        }
-        if (vkBindBufferMemory(device, buffer, memory, 0) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkBindBufferMemory(device local) failed");
-            return false;
-        }
-
-        if (vkQueueWaitIdle(queue) != VK_SUCCESS || vkResetCommandBuffer(commandBuffer, 0) != VK_SUCCESS) {
-            destroyStaging();
-            setError("Waiting for the Vulkan command buffer before mesh upload failed");
-            return false;
-        }
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkBeginCommandBuffer(buffer upload) failed");
-            return false;
-        }
-
-        VkBufferCopy copyRegion{};
-        copyRegion.size = size;
-        vkCmdCopyBuffer(commandBuffer, stagingBuffer, buffer, 1, &copyRegion);
-
-        VkBufferMemoryBarrier uploadBarrier{};
-        uploadBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        uploadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        uploadBarrier.dstAccessMask =
-            ((usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0 ? VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT : 0) |
-            ((usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) != 0 ? VK_ACCESS_INDEX_READ_BIT : 0);
-        uploadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        uploadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        uploadBarrier.buffer = buffer;
-        uploadBarrier.offset = 0;
-        uploadBarrier.size = size;
-        vkCmdPipelineBarrier(
-            commandBuffer,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-            0,
-            0,
-            nullptr,
-            1,
-            &uploadBarrier,
-            0,
-            nullptr);
-
-        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkEndCommandBuffer(buffer upload) failed");
-            return false;
-        }
-
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-        const VkResult submitResult = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-        const VkResult waitResult = submitResult == VK_SUCCESS ? vkQueueWaitIdle(queue) : submitResult;
-        destroyStaging();
-        if (submitResult != VK_SUCCESS || waitResult != VK_SUCCESS) {
-            setError("Buffer upload submission failed");
+        graphics_internal::MeshRenderer::UploadContext context;
+        context.device = device;
+        context.memoryProperties = memoryProperties;
+        context.commandBuffer = commandBuffer;
+        context.queue = queue;
+        if (!graphics_internal::MeshRenderer::uploadBuffer(
+                context, size, data, usage, buffer, memory)) {
+            setError("Buffer upload failed");
             return false;
         }
         return true;
     }
 
-    void destroyMeshResource(MeshResource& mesh) noexcept {
-        if (device != VK_NULL_HANDLE) {
-            if (mesh.indexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(device, mesh.indexBuffer, nullptr);
-            }
-            if (mesh.indexMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(device, mesh.indexMemory, nullptr);
-            }
-            if (mesh.vertexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(device, mesh.vertexBuffer, nullptr);
-            }
-            if (mesh.vertexMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(device, mesh.vertexMemory, nullptr);
-            }
-        }
-        mesh = MeshResource{};
-    }
 
     VkFormat chooseDepthFormat() noexcept {
         const VkFormat candidates[] = {
@@ -891,62 +636,14 @@ struct Graphics::Impl {
     }
 
     bool createDepthImage(VkExtent2D extent, VkImage& image, VkDeviceMemory& memory, VkImageView& view) {
-        image = VK_NULL_HANDLE;
-        memory = VK_NULL_HANDLE;
-        view = VK_NULL_HANDLE;
-
-        VkImageCreateInfo imageInfo{};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = depthFormat;
-        imageInfo.extent = {extent.width, extent.height, 1};
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
-            setError("vkCreateImage(depth) failed");
-            return false;
-        }
-
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(device, image, &requirements);
-        std::uint32_t memoryType = 0;
-        if (!findMemoryType(memoryProperties, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memoryType)) {
-            setError("No device-local memory for depth image");
-            return false;
-        }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = requirements.size;
-        allocateInfo.memoryTypeIndex = memoryType;
-        if (vkAllocateMemory(device, &allocateInfo, nullptr, &memory) != VK_SUCCESS) {
-            setError("vkAllocateMemory(depth) failed");
-            return false;
-        }
-        if (vkBindImageMemory(device, image, memory, 0) != VK_SUCCESS) {
-            setError("vkBindImageMemory(depth) failed");
-            return false;
-        }
-
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = depthFormat;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
-            setError("vkCreateImageView(depth) failed");
+        if (!graphics_internal::HdrRenderer::createDepthImage(
+                device, memoryProperties, depthFormat, extent, image, memory, view)) {
+            setError("Depth image creation failed");
             return false;
         }
         return true;
     }
+
 
     bool ensureDepthForExtent(std::uint32_t width, std::uint32_t height) {
         if (depthFormat == VK_FORMAT_UNDEFINED) {
@@ -1024,29 +721,12 @@ struct Graphics::Impl {
             if (reflectMemory != VK_NULL_HANDLE) {
                 vkFreeMemory(device, reflectMemory, nullptr);
             }
-            if (shadowFramebuffer != VK_NULL_HANDLE) {
-                vkDestroyFramebuffer(device, shadowFramebuffer, nullptr);
-            }
-            if (shadowRenderPass != VK_NULL_HANDLE) {
-                vkDestroyRenderPass(device, shadowRenderPass, nullptr);
-            }
+            graphics_internal::ShadowRenderer::destroyResources(device, shadow);
             if (reflectRenderPass != VK_NULL_HANDLE) {
                 vkDestroyRenderPass(device, reflectRenderPass, nullptr);
             }
-            if (shadowSampler != VK_NULL_HANDLE) {
-                vkDestroySampler(device, shadowSampler, nullptr);
-            }
             if (reflectSampler != VK_NULL_HANDLE) {
                 vkDestroySampler(device, reflectSampler, nullptr);
-            }
-            if (shadowView != VK_NULL_HANDLE) {
-                vkDestroyImageView(device, shadowView, nullptr);
-            }
-            if (shadowImage != VK_NULL_HANDLE) {
-                vkDestroyImage(device, shadowImage, nullptr);
-            }
-            if (shadowMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(device, shadowMemory, nullptr);
             }
             for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
                 if (sceneUniformBuffers[slot] != VK_NULL_HANDLE) {
@@ -1088,13 +768,8 @@ struct Graphics::Impl {
         reflectDepthView = VK_NULL_HANDLE;
         reflectWidth = 0;
         reflectHeight = 0;
-        shadowImage = VK_NULL_HANDLE;
-        shadowMemory = VK_NULL_HANDLE;
-        shadowView = VK_NULL_HANDLE;
-        shadowSampler = VK_NULL_HANDLE;
+        shadow = {};
         reflectSampler = VK_NULL_HANDLE;
-        shadowRenderPass = VK_NULL_HANDLE;
-        shadowFramebuffer = VK_NULL_HANDLE;
         reflectRenderPass = VK_NULL_HANDLE;
         // shadowMapSize is preset configuration, not a GPU target; it must
         // survive rebuilds so createShadowResources() sees the right size.
@@ -1120,130 +795,16 @@ struct Graphics::Impl {
         VkImageView& outDepthView,
         VkImage& outDepthImage,
         VkDeviceMemory& outDepthMemory) {
-        outImage = VK_NULL_HANDLE;
-        outMemory = VK_NULL_HANDLE;
-        outView = VK_NULL_HANDLE;
-        outFramebuffer = VK_NULL_HANDLE;
-        outDepthImage = VK_NULL_HANDLE;
-        outDepthMemory = VK_NULL_HANDLE;
-        outDepthView = VK_NULL_HANDLE;
-
-        VkImageCreateInfo imageInfo{};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = format;
-        imageInfo.extent = {width, height, 1};
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | extraUsage;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imageInfo, nullptr, &outImage) != VK_SUCCESS) {
-            setError("vkCreateImage(quality target) failed");
-            return false;
-        }
-
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(device, outImage, &requirements);
-        std::uint32_t memoryType = 0;
-        if (!findMemoryType(memoryProperties, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memoryType)) {
-            setError("No device-local memory for quality target");
-            return false;
-        }
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = requirements.size;
-        allocateInfo.memoryTypeIndex = memoryType;
-        if (vkAllocateMemory(device, &allocateInfo, nullptr, &outMemory) != VK_SUCCESS) {
-            setError("vkAllocateMemory(quality target) failed");
-            return false;
-        }
-        if (vkBindImageMemory(device, outImage, outMemory, 0) != VK_SUCCESS) {
-            setError("vkBindImageMemory(quality target) failed");
-            return false;
-        }
-
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = outImage;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = format;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &viewInfo, nullptr, &outView) != VK_SUCCESS) {
-            setError("vkCreateImageView(quality target) failed");
-            return false;
-        }
-
-        if (compatibleRenderPass != VK_NULL_HANDLE) {
-            if (!createDepthImage({width, height}, outDepthImage, outDepthMemory, outDepthView)) {
-                return false;
-            }
-            std::array<VkImageView, 2> attachments{outView, outDepthView};
-            VkFramebufferCreateInfo framebufferInfo{};
-            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            framebufferInfo.renderPass = compatibleRenderPass;
-            framebufferInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-            framebufferInfo.pAttachments = attachments.data();
-            framebufferInfo.width = width;
-            framebufferInfo.height = height;
-            framebufferInfo.layers = 1;
-            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &outFramebuffer) != VK_SUCCESS) {
-                setError("vkCreateFramebuffer(quality target) failed");
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool createShadowRenderPass() {
-        if (shadowRenderPass != VK_NULL_HANDLE) {
-            return true;
-        }
-        if (depthFormat == VK_FORMAT_UNDEFINED) {
-            depthFormat = chooseDepthFormat();
-            if (depthFormat == VK_FORMAT_UNDEFINED) {
-                setError("No supported depth attachment format");
-                return false;
-            }
-        }
-
-        VkAttachmentDescription depthAttachment{};
-        depthAttachment.format = depthFormat;
-        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // End in a combined read-only layout supported without enabling
-        // separateDepthStencilLayouts. Next frame discards with initialLayout
-        // UNDEFINED before rendering the map again.
-        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-
-        VkAttachmentReference depthReference{};
-        depthReference.attachment = 0;
-        depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.pDepthStencilAttachment = &depthReference;
-
-        VkRenderPassCreateInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassInfo.attachmentCount = 1;
-        renderPassInfo.pAttachments = &depthAttachment;
-        renderPassInfo.subpassCount = 1;
-        renderPassInfo.pSubpasses = &subpass;
-        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &shadowRenderPass) != VK_SUCCESS) {
-            setError("vkCreateRenderPass(shadow) failed");
+        if (!graphics_internal::HdrRenderer::createColorTarget(
+                device, memoryProperties, depthFormat, format, extraUsage, width, height,
+                compatibleRenderPass, outView, outFramebuffer, outImage, outMemory,
+                outDepthView, outDepthImage, outDepthMemory)) {
+            setError("Quality target creation failed");
             return false;
         }
         return true;
     }
+
 
     // Reflection target render pass: identical to the main one but always
     // ends in COLOR_ATTACHMENT_OPTIMAL so the image can be sampled later.
@@ -1258,108 +819,26 @@ struct Graphics::Impl {
                 return false;
             }
         }
-
-        VkAttachmentDescription colorAttachment{};
-        colorAttachment.format = colorFormat;
-        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // Ends sampled: the main pass samples the reflect target as a texture.
-        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkAttachmentDescription depthAttachment{};
-        depthAttachment.format = depthFormat;
-        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        std::array<VkAttachmentDescription, 2> attachments{colorAttachment, depthAttachment};
-
-        VkAttachmentReference colorReference{};
-        colorReference.attachment = 0;
-        colorReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference depthReference{};
-        depthReference.attachment = 1;
-        depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &colorReference;
-        subpass.pDepthStencilAttachment = &depthReference;
-
-        VkRenderPassCreateInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-        renderPassInfo.pAttachments = attachments.data();
-        renderPassInfo.subpassCount = 1;
-        renderPassInfo.pSubpasses = &subpass;
-        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &reflectRenderPass) != VK_SUCCESS) {
+        if (!graphics_internal::HdrRenderer::createRenderPass(
+                device, colorFormat, depthFormat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, reflectRenderPass)) {
             setError("vkCreateRenderPass(reflect) failed");
             return false;
         }
         return true;
     }
 
+
     bool createShadowResources() {
-        if (!createShadowRenderPass()) {
-            return false;
+        if (depthFormat == VK_FORMAT_UNDEFINED) {
+            depthFormat = chooseDepthFormat();
+            if (depthFormat == VK_FORMAT_UNDEFINED) {
+                setError("No supported depth attachment format");
+                return false;
+            }
         }
-        VkImageCreateInfo imageInfo{};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = depthFormat;
-        imageInfo.extent = {shadowMapSize, shadowMapSize, 1};
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imageInfo, nullptr, &shadowImage) != VK_SUCCESS) {
-            setError("vkCreateImage(shadow map) failed");
-            return false;
-        }
-
-        VkMemoryRequirements requirements{};
-        vkGetImageMemoryRequirements(device, shadowImage, &requirements);
-        std::uint32_t memoryType = 0;
-        if (!findMemoryType(memoryProperties, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memoryType)) {
-            setError("No device-local memory for shadow map");
-            return false;
-        }
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = requirements.size;
-        allocateInfo.memoryTypeIndex = memoryType;
-        if (vkAllocateMemory(device, &allocateInfo, nullptr, &shadowMemory) != VK_SUCCESS) {
-            setError("vkAllocateMemory(shadow map) failed");
-            return false;
-        }
-        if (vkBindImageMemory(device, shadowImage, shadowMemory, 0) != VK_SUCCESS) {
-            setError("vkBindImageMemory(shadow map) failed");
-            return false;
-        }
-
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = shadowImage;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = depthFormat;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &viewInfo, nullptr, &shadowView) != VK_SUCCESS) {
-            setError("vkCreateImageView(shadow map) failed");
+        if (!graphics_internal::ShadowRenderer::createResources(
+                device, memoryProperties, depthFormat, shadowMapSize, shadow)) {
+            setError("Shadow map resource creation failed");
             return false;
         }
 
@@ -1373,29 +852,13 @@ struct Graphics::Impl {
         samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         samplerInfo.compareEnable = VK_FALSE;
         samplerInfo.maxLod = 1.0f;
-        if (vkCreateSampler(device, &samplerInfo, nullptr, &shadowSampler) != VK_SUCCESS) {
-            setError("vkCreateSampler(shadow) failed");
-            return false;
-        }
         if (vkCreateSampler(device, &samplerInfo, nullptr, &reflectSampler) != VK_SUCCESS) {
             setError("vkCreateSampler(reflection) failed");
             return false;
         }
-
-        VkFramebufferCreateInfo framebufferInfo{};
-        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = shadowRenderPass;
-        framebufferInfo.attachmentCount = 1;
-        framebufferInfo.pAttachments = &shadowView;
-        framebufferInfo.width = shadowMapSize;
-        framebufferInfo.height = shadowMapSize;
-        framebufferInfo.layers = 1;
-        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &shadowFramebuffer) != VK_SUCCESS) {
-            setError("vkCreateFramebuffer(shadow) failed");
-            return false;
-        }
         return true;
     }
+
 
     bool createSceneDescriptorLayout() {
         // Matches the shader declaration in mesh.frag/mesh.vert:
@@ -1510,8 +973,8 @@ struct Graphics::Impl {
             albedoDescriptor.imageView = albedoResource.view;
             albedoDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             VkDescriptorImageInfo shadowDescriptor{};
-            shadowDescriptor.sampler = shadowSampler;
-            shadowDescriptor.imageView = shadowView;
+            shadowDescriptor.sampler = shadow.sampler;
+            shadowDescriptor.imageView = shadow.view;
             shadowDescriptor.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
             std::array<VkWriteDescriptorSet, 4> writes{};
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1572,171 +1035,20 @@ struct Graphics::Impl {
         const void* pixels,
         std::size_t dataSize,
         VkImageLayout oldLayout) {
-        if (device == VK_NULL_HANDLE || commandBuffer == VK_NULL_HANDLE || pixels == nullptr ||
-            dataSize == 0 || dataSize != texture.dataSize) {
-            setError("Texture upload data is invalid");
+        graphics_internal::TextureManager::UploadContext context;
+        context.device = device;
+        context.memoryProperties = memoryProperties;
+        context.commandBuffer = commandBuffer;
+        context.queue = queue;
+        if (!graphics_internal::TextureManager::uploadTexture(
+                context, texture, pixels, dataSize, oldLayout)) {
+            setError("Texture upload failed");
             return false;
         }
-
-        VkBuffer stagingBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-        auto destroyStaging = [&]() noexcept {
-            if (device != VK_NULL_HANDLE) {
-                if (stagingBuffer != VK_NULL_HANDLE) {
-                    vkDestroyBuffer(device, stagingBuffer, nullptr);
-                }
-                if (stagingMemory != VK_NULL_HANDLE) {
-                    vkFreeMemory(device, stagingMemory, nullptr);
-                }
-            }
-            stagingBuffer = VK_NULL_HANDLE;
-            stagingMemory = VK_NULL_HANDLE;
-        };
-
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = dataSize;
-        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
-            setError("vkCreateBuffer(texture staging) failed");
-            return false;
-        }
-
-        VkMemoryRequirements bufferRequirements{};
-        vkGetBufferMemoryRequirements(device, stagingBuffer, &bufferRequirements);
-        std::uint32_t stagingMemoryType = 0;
-        if (!findMemoryType(
-                memoryProperties,
-                bufferRequirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                stagingMemoryType)) {
-            destroyStaging();
-            setError("No host-visible coherent memory for texture staging");
-            return false;
-        }
-
-        VkMemoryAllocateInfo stagingMemoryInfo{};
-        stagingMemoryInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        stagingMemoryInfo.allocationSize = bufferRequirements.size;
-        stagingMemoryInfo.memoryTypeIndex = stagingMemoryType;
-        if (vkAllocateMemory(device, &stagingMemoryInfo, nullptr, &stagingMemory) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkAllocateMemory(texture staging) failed");
-            return false;
-        }
-        if (vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkBindBufferMemory(texture staging) failed");
-            return false;
-        }
-
-        void* mapped = nullptr;
-        if (vkMapMemory(device, stagingMemory, 0, dataSize, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
-            destroyStaging();
-            setError("vkMapMemory(texture staging) failed");
-            return false;
-        }
-        std::memcpy(mapped, pixels, dataSize);
-        vkUnmapMemory(device, stagingMemory);
-
-        vkDeviceWaitIdle(device);
-        const VkResult resetResult = vkResetCommandBuffer(commandBuffer, 0);
-        if (resetResult != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkResetCommandBuffer(texture upload) failed");
-            return false;
-        }
-
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkBeginCommandBuffer(texture upload) failed");
-            return false;
-        }
-
-        VkImageMemoryBarrier toTransfer{};
-        toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toTransfer.oldLayout = oldLayout;
-        toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toTransfer.image = texture.image;
-        toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        toTransfer.subresourceRange.levelCount = 1;
-        toTransfer.subresourceRange.layerCount = 1;
-        toTransfer.srcAccessMask = oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            ? VK_ACCESS_SHADER_READ_BIT
-            : 0;
-        toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(
-            commandBuffer,
-            oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            1,
-            &toTransfer);
-
-        VkBufferImageCopy copyRegion{};
-        copyRegion.bufferOffset = 0;
-        copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copyRegion.imageSubresource.layerCount = 1;
-        copyRegion.imageExtent = {texture.width, texture.height, 1};
-        vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
-
-        VkImageMemoryBarrier toRead{};
-        toRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toRead.image = texture.image;
-        toRead.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        toRead.subresourceRange.levelCount = 1;
-        toRead.subresourceRange.layerCount = 1;
-        toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(
-            commandBuffer,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0,
-            0,
-            nullptr,
-            0,
-            nullptr,
-            1,
-            &toRead);
-
-        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
-            destroyStaging();
-            setError("vkEndCommandBuffer(texture upload) failed");
-            return false;
-        }
-
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-        const VkResult submitResult = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-        const VkResult waitResult = submitResult == VK_SUCCESS ? vkQueueWaitIdle(queue) : submitResult;
-        destroyStaging();
-        if (submitResult != VK_SUCCESS || waitResult != VK_SUCCESS) {
-            setError("Vulkan texture upload submission failed");
-            return false;
-        }
-
         ++textureUploadCount;
         return true;
     }
+
 
     bool createTextureResource(const TextureDesc& description, TextureResource& texture) {
         if (device == VK_NULL_HANDLE || commandBuffer == VK_NULL_HANDLE ||
@@ -1760,47 +1072,6 @@ struct Graphics::Impl {
             return false;
         }
 
-        // Quality auto-compression: Low keeps every second texel, Medium 3 of
-        // 4, High keeps the source data untouched.
-        TextureDesc effective = description;
-        std::vector<std::uint8_t> downscaledPixels;
-        const std::uint32_t scale = textureScalePercent;
-        if (scale < 100 && (description.width > 4 || description.height > 4)) {
-            const std::uint32_t scaledWidth = std::max<std::uint32_t>(1, description.width * scale / 100);
-            const std::uint32_t scaledHeight = std::max<std::uint32_t>(1, description.height * scale / 100);
-            std::vector<std::uint8_t> boxFiltered(
-                static_cast<std::size_t>(scaledWidth) * scaledHeight * bytesPerPixel);
-            const auto* source = static_cast<const std::uint8_t*>(description.pixels);
-            for (std::uint32_t y = 0; y < scaledHeight; ++y) {
-                const std::uint32_t sourceY0 = static_cast<std::uint32_t>(
-                    static_cast<std::uint64_t>(y) * description.height / scaledHeight);
-                const std::uint32_t sourceY1 = std::min(description.height - 1, static_cast<std::uint32_t>(
-                    static_cast<std::uint64_t>(y + 1) * description.height / scaledHeight));
-                for (std::uint32_t x = 0; x < scaledWidth; ++x) {
-                    const std::uint32_t sourceX0 = static_cast<std::uint32_t>(
-                        static_cast<std::uint64_t>(x) * description.width / scaledWidth);
-                    const std::uint32_t sourceX1 = std::min(description.width - 1, static_cast<std::uint32_t>(
-                        static_cast<std::uint64_t>(x + 1) * description.width / scaledWidth));
-                    for (std::uint32_t component = 0; component < bytesPerPixel; ++component) {
-                        std::uint32_t sum = 0;
-                        std::uint32_t count = 0;
-                        for (std::uint32_t sy = sourceY0; sy <= sourceY1; ++sy) {
-                            for (std::uint32_t sx = sourceX0; sx <= sourceX1; ++sx) {
-                                sum += source[(static_cast<std::size_t>(sy) * description.width + sx) * bytesPerPixel + component];
-                                ++count;
-                            }
-                        }
-                        boxFiltered[(static_cast<std::size_t>(y) * scaledWidth + x) * bytesPerPixel + component] =
-                            static_cast<std::uint8_t>(sum / count);
-                    }
-                }
-            }
-            downscaledPixels = std::move(boxFiltered);
-            effective.width = scaledWidth;
-            effective.height = scaledHeight;
-            effective.pixels = downscaledPixels.data();
-            effective.dataSize = downscaledPixels.size();
-        }
         VkFormatProperties formatProperties{};
         vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &formatProperties);
         if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0 ||
@@ -1809,92 +1080,20 @@ struct Graphics::Impl {
             return false;
         }
 
-        struct CleanupGuard {
-            Impl* impl = nullptr;
-            TextureResource* texture = nullptr;
-            bool committed = false;
-
-            ~CleanupGuard() {
-                if (!committed && impl != nullptr && texture != nullptr) {
-                    impl->destroyTextureResource(*texture);
-                }
-            }
-        } cleanup{this, &texture, false};
-
-        VkImageCreateInfo imageInfo{};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = format;
-        imageInfo.extent = {effective.width, effective.height, 1};
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imageInfo, nullptr, &texture.image) != VK_SUCCESS) {
-            setError("vkCreateImage(texture) failed");
+        graphics_internal::TextureManager::CreateContext context;
+        context.device = device;
+        context.physicalDevice = physicalDevice;
+        context.memoryProperties = memoryProperties;
+        context.commandBuffer = commandBuffer;
+        context.queue = queue;
+        if (!graphics_internal::TextureManager::createResource(
+                context, description, format, bytesPerPixel, textureScalePercent, texture)) {
+            setError("Texture resource creation failed");
             return false;
         }
-
-        VkMemoryRequirements imageRequirements{};
-        vkGetImageMemoryRequirements(device, texture.image, &imageRequirements);
-        std::uint32_t imageMemoryType = 0;
-        if (!findMemoryType(memoryProperties, imageRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, imageMemoryType)) {
-            setError("No device-local memory for texture");
-            return false;
-        }
-        VkMemoryAllocateInfo imageMemoryInfo{};
-        imageMemoryInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        imageMemoryInfo.allocationSize = imageRequirements.size;
-        imageMemoryInfo.memoryTypeIndex = imageMemoryType;
-        if (vkAllocateMemory(device, &imageMemoryInfo, nullptr, &texture.memory) != VK_SUCCESS) {
-            setError("vkAllocateMemory(texture) failed");
-            return false;
-        }
-        if (vkBindImageMemory(device, texture.image, texture.memory, 0) != VK_SUCCESS) {
-            setError("vkBindImageMemory(texture) failed");
-            return false;
-        }
-
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = texture.image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = format;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &viewInfo, nullptr, &texture.view) != VK_SUCCESS) {
-            setError("vkCreateImageView(texture) failed");
-            return false;
-        }
-
-        VkSamplerCreateInfo samplerInfo{};
-        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_LINEAR;
-        samplerInfo.minFilter = VK_FILTER_LINEAR;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerInfo.maxLod = 1.0f;
-        if (vkCreateSampler(device, &samplerInfo, nullptr, &texture.sampler) != VK_SUCCESS) {
-            setError("vkCreateSampler(texture) failed");
-            return false;
-        }
-
-        texture.format = format;
-        texture.width = effective.width;
-        texture.height = effective.height;
-        texture.dataSize = effective.dataSize;
-        if (!uploadTextureData(texture, effective.pixels, effective.dataSize, VK_IMAGE_LAYOUT_UNDEFINED)) {
-            return false;
-        }
-        cleanup.committed = true;
         return true;
     }
+
 
     bool createDefaultTexture() {
         constexpr std::uint8_t pixels[] = {255, 255, 255, 255};
@@ -2287,60 +1486,17 @@ struct Graphics::Impl {
                 return false;
             }
         }
-
-        VkAttachmentDescription colorAttachment{};
-        colorAttachment.format = colorFormat;
-        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // Swapchain images must end the pass in PRESENT_SRC_KHR, otherwise the
-        // presented contents are undefined (black screen). Headless keeps the
-        // attachment layout since nothing is presented.
-        colorAttachment.finalLayout = headless
+        const VkImageLayout finalLayout = headless
             ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
             : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-        VkAttachmentDescription depthAttachment{};
-        depthAttachment.format = depthFormat;
-        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        std::array<VkAttachmentDescription, 2> attachments{colorAttachment, depthAttachment};
-
-        VkAttachmentReference colorReference{};
-        colorReference.attachment = 0;
-        colorReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference depthReference{};
-        depthReference.attachment = 1;
-        depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &colorReference;
-        subpass.pDepthStencilAttachment = &depthReference;
-
-        VkRenderPassCreateInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-        renderPassInfo.pAttachments = attachments.data();
-        renderPassInfo.subpassCount = 1;
-        renderPassInfo.pSubpasses = &subpass;
-        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+        if (!graphics_internal::HdrRenderer::createRenderPass(
+                device, colorFormat, depthFormat, finalLayout, renderPass)) {
             setError("vkCreateRenderPass failed");
             return false;
         }
         return true;
     }
+
 
     // HDR render pass: same structure as the main one, HDR color format.
     bool createHdrRenderPass() {
@@ -2354,56 +1510,14 @@ struct Graphics::Impl {
                 return false;
             }
         }
-
-        VkAttachmentDescription colorAttachment{};
-        colorAttachment.format = hdrFormat;
-        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // Ends sampled: the tonemap pass samples the HDR target as a texture.
-        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkAttachmentDescription depthAttachment{};
-        depthAttachment.format = depthFormat;
-        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        std::array<VkAttachmentDescription, 2> attachments{colorAttachment, depthAttachment};
-
-        VkAttachmentReference colorReference{};
-        colorReference.attachment = 0;
-        colorReference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference depthReference{};
-        depthReference.attachment = 1;
-        depthReference.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &colorReference;
-        subpass.pDepthStencilAttachment = &depthReference;
-
-        VkRenderPassCreateInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-        renderPassInfo.pAttachments = attachments.data();
-        renderPassInfo.subpassCount = 1;
-        renderPassInfo.pSubpasses = &subpass;
-        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &hdrRenderPass) != VK_SUCCESS) {
+        if (!graphics_internal::HdrRenderer::createRenderPass(
+                device, hdrFormat, depthFormat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, hdrRenderPass)) {
             setError("vkCreateRenderPass(hdr) failed");
             return false;
         }
         return true;
     }
+
 
     void destroyHeadlessTarget() noexcept {
         if (device == VK_NULL_HANDLE) {
@@ -2690,176 +1804,41 @@ struct Graphics::Impl {
         }
     }
 
-    void recordMeshDraws(
-        const float viewProjMatrix[16],
-        std::uint32_t uniformSlot,
-        VkPipeline pipelineOverride = VK_NULL_HANDLE) noexcept {
-        PushConstants push{};
-        std::memcpy(push.viewProj, viewProjMatrix, sizeof(push.viewProj));
-        vkCmdBindPipeline(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            pipelineOverride != VK_NULL_HANDLE ? pipelineOverride : meshPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            meshPipelineLayout,
-            0,
-            1,
-            &sceneDescriptorSets[uniformSlot],
-            0,
-            nullptr);
-
-        for (const RenderItem& item : pendingItems) {
-            const auto meshIt = meshes.find(item.meshId);
-            if (meshIt == meshes.end() || meshIt->second.vertexBuffer == VK_NULL_HANDLE) {
-                continue;
-            }
-            std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
-            std::memcpy(push.color, item.color, sizeof(push.color));
-            vkCmdPushConstants(
-                commandBuffer,
-                meshPipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-                sizeof(PushConstants),
-                &push);
-
-            VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &meshIt->second.vertexBuffer, &offset);
-            if (meshIt->second.indexBuffer != VK_NULL_HANDLE) {
-                vkCmdBindIndexBuffer(commandBuffer, meshIt->second.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(commandBuffer, meshIt->second.indexCount, 1, 0, 0, 0);
-            } else {
-                vkCmdDraw(commandBuffer, meshIt->second.vertexCount, 1, 0, 0);
-            }
-        }
-    }
-
     // Shadow pass: meshes into the sun depth map with the reflected camera
     // when reflections are on (the mirror needs shadows of reflected geometry).
-    void recordShadowPass() {
+    void renderShadowMap() {
         float sunMatrix[16];
         buildSunMatrix(sunMatrix);
 
-        VkClearValue clearValue{};
-        clearValue.depthStencil = {1.0f, 0};
-        VkRenderPassBeginInfo begin{};
-        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        begin.renderPass = shadowRenderPass;
-        begin.framebuffer = shadowFramebuffer;
-        begin.renderArea.extent = {shadowMapSize, shadowMapSize};
-        begin.clearValueCount = 1;
-        begin.pClearValues = &clearValue;
-        vkCmdBeginRenderPass(commandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
-
-        VkViewport viewport{};
-        viewport.width = static_cast<float>(shadowMapSize);
-        viewport.height = static_cast<float>(shadowMapSize);
-        viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        VkRect2D scissor{};
-        scissor.extent = {shadowMapSize, shadowMapSize};
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            shadowPipelineLayout,
-            0,
-            1,
-            &sceneDescriptorSets[0],
-            0,
-            nullptr);
-        PushConstants push{};
-        std::memcpy(push.viewProj, sunMatrix, sizeof(push.viewProj));
-        for (const RenderItem& item : pendingItems) {
-            const auto meshIt = meshes.find(item.meshId);
-            if (meshIt == meshes.end() || meshIt->second.vertexBuffer == VK_NULL_HANDLE) {
-                continue;
-            }
-            std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
-            vkCmdPushConstants(
-                commandBuffer,
-                shadowPipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-                sizeof(PushConstants),
-                &push);
-            VkDeviceSize offset = 0;
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &meshIt->second.vertexBuffer, &offset);
-            if (meshIt->second.indexBuffer != VK_NULL_HANDLE) {
-                vkCmdBindIndexBuffer(commandBuffer, meshIt->second.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(commandBuffer, meshIt->second.indexCount, 1, 0, 0, 0);
-            } else {
-                vkCmdDraw(commandBuffer, meshIt->second.vertexCount, 1, 0, 0);
-            }
-        }
-        vkCmdEndRenderPass(commandBuffer);
+        graphics_internal::ShadowRenderer::RenderContext context;
+        context.commandBuffer = commandBuffer;
+        context.renderPass = shadow.renderPass;
+        context.framebuffer = shadow.framebuffer;
+        context.mapSize = shadowMapSize;
+        context.pipeline = shadowPipeline;
+        context.pipelineLayout = shadowPipelineLayout;
+        context.descriptorSet = sceneDescriptorSets[0];
+        graphics_internal::ShadowRenderer::renderShadowMap(context, sunMatrix, pendingItems, meshes);
     }
+
 
     // Fullscreen tonemap/copy pass from the HDR target into `target`.
-    void recordTonemapPass(VkFramebuffer target, std::uint32_t width, std::uint32_t height) {
-        std::array<VkClearValue, 2> clearValues{};
-        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        clearValues[1].depthStencil = {1.0f, 0};
-        VkRenderPassBeginInfo begin{};
-        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        begin.renderPass = renderPass;
-        begin.framebuffer = target;
-        begin.renderArea.extent = {width, height};
-        begin.clearValueCount = static_cast<std::uint32_t>(clearValues.size());
-        begin.pClearValues = clearValues.data();
-        vkCmdBeginRenderPass(commandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
-
-        VkViewport viewport{};
-        viewport.width = static_cast<float>(width);
-        viewport.height = static_cast<float>(height);
-        viewport.minDepth = 0.0f;
-        viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        VkRect2D scissor{};
-        scissor.extent = {width, height};
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemapPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            tonemapPipelineLayout,
-            0,
-            1,
-            &tonemapDescriptorSet,
-            0,
-            nullptr);
-        UiPushConstants ui{};
-        if (!uiDrawList.roundedRects.empty()) {
-            const auto& item = uiDrawList.roundedRects.front();
-            ui.rect[0] = item.first.x;
-            ui.rect[1] = item.first.y;
-            ui.rect[2] = item.first.width;
-            ui.rect[3] = item.first.height;
-            ui.color[0] = item.second.r;
-            ui.color[1] = item.second.g;
-            ui.color[2] = item.second.b;
-            ui.color[3] = item.second.a;
-            ui.radius[0] = uiDrawList.cornerRadius;
-            ui.radius[1] = uiDrawList.cornerRadius;
-            ui.radius[2] = uiDrawList.cornerRadius;
-            ui.radius[3] = uiDrawList.cornerRadius;
-            ui.smoothing[0] = 1.0f;
-            ui.blur[0] = static_cast<float>(uiDrawList.blur.mode);
-            ui.blur[1] = uiDrawList.blur.radius;
-            ui.blur[2] = uiDrawList.blur.intensity;
-        }
-        vkCmdPushConstants(commandBuffer, tonemapPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(ui), &ui);
-        vkCmdDraw(commandBuffer, 4, 1, 0, 0);
-        vkCmdEndRenderPass(commandBuffer);
+    void renderTonemap(VkFramebuffer target, std::uint32_t width, std::uint32_t height) {
+        graphics_internal::HdrRenderer::TonemapContext context;
+        context.commandBuffer = commandBuffer;
+        context.renderPass = renderPass;
+        context.pipeline = tonemapPipeline;
+        context.pipelineLayout = tonemapPipelineLayout;
+        context.descriptorSet = tonemapDescriptorSet;
+        graphics_internal::HdrRenderer::renderTonemap(
+            context, target, width, height,
+            [this, width, height](VkCommandBuffer buffer, VkPipelineLayout layout) {
+                rectRenderer.draw(buffer, layout, width, height);
+            });
     }
 
-    bool recordFrame(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept {
+
+    bool renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept {
         if (vkResetCommandBuffer(commandBuffer, 0) != VK_SUCCESS) {
             setError("vkResetCommandBuffer failed");
             return false;
@@ -2879,7 +1858,7 @@ struct Graphics::Impl {
         writeSceneUniforms(uniformSlot, sunMatrix);
 
         if (shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
-            recordShadowPass();
+            renderShadowMap();
         }
 
         // Reflection pass: mirrored camera renders the scene into a smaller
@@ -2910,7 +1889,11 @@ struct Graphics::Impl {
             const Mat4 mirroredView = reflectViewMatrix();
             float reflectViewProj[16];
             Impl::multiplyMat4(pendingProjection, mirroredView.m[0], reflectViewProj);
-            recordMeshDraws(reflectViewProj, uniformSlot);            vkCmdEndRenderPass(commandBuffer);
+            graphics_internal::MeshRenderer::renderMeshes(
+                commandBuffer, meshPipeline, meshPipelineLayout,
+                sceneDescriptorSets[uniformSlot], reflectViewProj,
+                pendingItems, meshes);
+            vkCmdEndRenderPass(commandBuffer);
         }
 
         // Main pass: meshes render into the HDR target at Medium/High, or
@@ -2969,13 +1952,16 @@ struct Graphics::Impl {
             }
 
             if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
-                recordMeshDraws(pendingViewProj, uniformSlot, mainMeshPipeline);
+                graphics_internal::MeshRenderer::renderMeshes(
+                    commandBuffer, meshPipeline, meshPipelineLayout,
+                    sceneDescriptorSets[uniformSlot], pendingViewProj,
+                    pendingItems, meshes, mainMeshPipeline);
             }
             vkCmdEndRenderPass(commandBuffer);
         }
 
         if (useHdr) {
-            recordTonemapPass(targetFramebuffer, width, height);
+            renderTonemap(targetFramebuffer, width, height);
         }
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -3019,23 +2005,10 @@ struct Graphics::Impl {
                 vkDestroyShaderModule(device, meshFragmentShader, nullptr);
                 meshFragmentShader = VK_NULL_HANDLE;
             }
-            for (std::uint32_t slot = 0; slot < maxFramesInFlight; ++slot) {
-                if (acquireSemaphores[slot] != VK_NULL_HANDLE) {
-                    vkDestroySemaphore(device, acquireSemaphores[slot], nullptr);
-                    acquireSemaphores[slot] = VK_NULL_HANDLE;
-                }
-                if (renderFinishedSemaphores[slot] != VK_NULL_HANDLE) {
-                    vkDestroySemaphore(device, renderFinishedSemaphores[slot], nullptr);
-                    renderFinishedSemaphores[slot] = VK_NULL_HANDLE;
-                }
-                if (frameFences[slot] != VK_NULL_HANDLE) {
-                    vkDestroyFence(device, frameFences[slot], nullptr);
-                    frameFences[slot] = VK_NULL_HANDLE;
-                }
-            }
+            graphics_internal::Device::destroyFrameSync(device, frameSync);
             destroyDescriptorResources();
             for (auto& entry : textures) {
-                destroyTextureResource(entry.second);
+                graphics_internal::TextureManager::destroyResource(device, entry.second);
             }
             textures.clear();
             defaultTexture = invalidTextureHandle;
@@ -3043,7 +2016,7 @@ struct Graphics::Impl {
             nextTextureId = 1;
             textureUploadCount = 0;
             for (auto& entry : meshes) {
-                destroyMeshResource(entry.second);
+                graphics_internal::MeshRenderer::destroyResource(device, entry.second);
             }
             meshes.clear();
             nextMeshId = 1;
@@ -3121,7 +2094,7 @@ struct Graphics::Impl {
         } else {
             destroySwapchainResources();
             for (auto& entry : textures) {
-                destroyTextureResource(entry.second);
+                graphics_internal::TextureManager::destroyResource(device, entry.second);
             }
             textures.clear();
             defaultTexture = invalidTextureHandle;
@@ -3129,7 +2102,7 @@ struct Graphics::Impl {
             nextTextureId = 1;
             textureUploadCount = 0;
             for (auto& entry : meshes) {
-                destroyMeshResource(entry.second);
+                graphics_internal::MeshRenderer::destroyResource(device, entry.second);
             }
             meshes.clear();
             nextMeshId = 1;
@@ -3155,11 +2128,7 @@ struct Graphics::Impl {
         physicalDevice = VK_NULL_HANDLE;
         queue = VK_NULL_HANDLE;
         commandBuffer = VK_NULL_HANDLE;
-        for (std::uint32_t slot = 0; slot < maxFramesInFlight; ++slot) {
-            acquireSemaphores[slot] = VK_NULL_HANDLE;
-            renderFinishedSemaphores[slot] = VK_NULL_HANDLE;
-            frameFences[slot] = VK_NULL_HANDLE;
-        }
+        frameSync = {};
         currentFrameSlot = 0;
         colorFormat = VK_FORMAT_UNDEFINED;
         depthFormat = VK_FORMAT_UNDEFINED;
@@ -3240,6 +2209,9 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->shadowMapSize = impl_->shadowConfig.mapSize;
     impl_->shadowTaps = static_cast<int>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
     impl_->shadowStrength = impl_->shadowConfig.strength;
+    impl_->shadowRenderer.setConfig(impl_->shadowConfig);
+    impl_->shadowRenderer.setPlayerUltra(impl_->playerUltraShadows);
+    impl_->hdrRenderer.setAntiAliasing(config.antiAliasing);
 
     struct InitializationGuard {
         Impl* impl = nullptr;
@@ -3264,54 +2236,17 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
 #endif
     }
 
-    const bool validationLayerAvailable = hasLayer("VK_LAYER_KHRONOS_validation");
-    impl_->validationEnabled = config.enableValidation && validationLayerAvailable;
+    graphics_internal::Device::InstanceResult instanceResult;
+    if (!graphics_internal::Device::createInstance(
+            config.headless, config.enableValidation, &impl_->validationMessageCount, instanceResult)) {
+        impl_->setError("Vulkan instance creation failed");
+        return false;
+    }
+    impl_->validationEnabled = instanceResult.validationEnabled;
+    impl_->instance = instanceResult.instance;
+    impl_->debugMessenger = instanceResult.messenger;
+    impl_->destroyDebugMessenger = instanceResult.destroyMessenger;
     engineLog("=== init headless=%d validation=%d ===", config.headless ? 1 : 0, impl_->validationEnabled ? 1 : 0);
-
-    VkApplicationInfo applicationInfo{};
-    applicationInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    applicationInfo.pApplicationName = "Aporia Engine";
-    applicationInfo.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
-    applicationInfo.pEngineName = "Aporia Engine";
-    applicationInfo.engineVersion = VK_MAKE_VERSION(0, 1, 0);
-    applicationInfo.apiVersion = VK_API_VERSION_1_3;
-
-    const char* layerName = "VK_LAYER_KHRONOS_validation";
-    VkInstanceCreateInfo instanceInfo{};
-    instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    instanceInfo.pApplicationInfo = &applicationInfo;
-    instanceInfo.enabledLayerCount = impl_->validationEnabled ? 1u : 0u;
-    instanceInfo.ppEnabledLayerNames = impl_->validationEnabled ? &layerName : nullptr;
-
-    const bool debugUtilsAvailable = hasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    std::vector<const char*> instanceExtensions;
-    if (!impl_->headless) {
-        if (!hasInstanceExtension(VK_KHR_SURFACE_EXTENSION_NAME)) {
-            impl_->setError("Vulkan surface extension is unavailable");
-            return false;
-        }
-#if defined(_WIN32)
-        if (!hasInstanceExtension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME)) {
-            impl_->setError("Vulkan Win32 surface extension is unavailable");
-            return false;
-        }
-        instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-        instanceExtensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
-#else
-        impl_->setError("Vulkan Win32 surface extension is unavailable");
-        return false;
-#endif
-    }
-    if (impl_->validationEnabled && debugUtilsAvailable) {
-        instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    }
-    instanceInfo.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
-    instanceInfo.ppEnabledExtensionNames = instanceExtensions.empty() ? nullptr : instanceExtensions.data();
-
-    if (vkCreateInstance(&instanceInfo, nullptr, &impl_->instance) != VK_SUCCESS) {
-        impl_->setError("vkCreateInstance failed");
-        return false;
-    }
 
     if (!impl_->headless) {
 #if defined(_WIN32)
@@ -3350,107 +2285,21 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
 #endif
     }
 
-    if (impl_->validationEnabled && debugUtilsAvailable) {
-        auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
-            vkGetInstanceProcAddr(impl_->instance, "vkCreateDebugUtilsMessengerEXT"));
-        if (createMessenger != nullptr) {
-            VkDebugUtilsMessengerCreateInfoEXT messengerInfo{};
-            messengerInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-            messengerInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-            messengerInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-            messengerInfo.pfnUserCallback = validationCallback;
-            messengerInfo.pUserData = &impl_->validationMessageCount;
-            if (createMessenger(impl_->instance, &messengerInfo, nullptr, &impl_->debugMessenger) != VK_SUCCESS) {
-                impl_->debugMessenger = VK_NULL_HANDLE;
-            }
-        }
-        if (impl_->debugMessenger != VK_NULL_HANDLE) {
-            impl_->destroyDebugMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
-                vkGetInstanceProcAddr(impl_->instance, "vkDestroyDebugUtilsMessengerEXT"));
-        }
-    }
 
-    std::uint32_t physicalDeviceCount = 0;
-    if (vkEnumeratePhysicalDevices(impl_->instance, &physicalDeviceCount, nullptr) != VK_SUCCESS || physicalDeviceCount == 0) {
-        impl_->setError("No Vulkan physical device is available");
+    graphics_internal::Device::DeviceCreateResult deviceResult;
+    if (!graphics_internal::Device::createDevice(impl_->instance, impl_->headless, deviceResult)) {
+        impl_->setError("Vulkan device creation failed");
         shutdown();
         return false;
     }
-
-    std::vector<VkPhysicalDevice> physicalDevices(physicalDeviceCount);
-    if (vkEnumeratePhysicalDevices(impl_->instance, &physicalDeviceCount, physicalDevices.data()) != VK_SUCCESS) {
-        impl_->setError("vkEnumeratePhysicalDevices failed");
-        shutdown();
-        return false;
-    }
-
-    int bestScore = -1;
-    for (const VkPhysicalDevice candidate : physicalDevices) {
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(candidate, &properties);
-        int score = 0;
-        if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-            score += 2;
-        } else if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
-            score += 1;
-        }
-        if (score > bestScore) {
-            bestScore = score;
-            impl_->physicalDevice = candidate;
-            impl_->deviceName = properties.deviceName;
-        }
-    }
-
-    if (impl_->physicalDevice == VK_NULL_HANDLE) {
-        impl_->setError("Vulkan physical device selection failed");
-        shutdown();
-        return false;
-    }
+    impl_->physicalDevice = deviceResult.physicalDevice;
+    impl_->device = deviceResult.device;
+    impl_->queue = deviceResult.queue;
+    impl_->graphicsFamily = deviceResult.graphicsFamily;
+    impl_->memoryProperties = deviceResult.memoryProperties;
+    impl_->deviceName = deviceResult.deviceName;
     engineLog("device: %s headless=%d", impl_->deviceName.c_str(), impl_->headless ? 1 : 0);
 
-    std::uint32_t familyCount = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(impl_->physicalDevice, &familyCount, nullptr);
-    std::vector<VkQueueFamilyProperties> families(familyCount);
-    vkGetPhysicalDeviceQueueFamilyProperties(impl_->physicalDevice, &familyCount, families.data());
-    bool graphicsFamilyFound = false;
-    for (std::uint32_t index = 0; index < familyCount; ++index) {
-        if ((families[index].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
-            impl_->graphicsFamily = index;
-            graphicsFamilyFound = true;
-            break;
-        }
-    }
-    if (!graphicsFamilyFound) {
-        impl_->setError("Vulkan graphics queue family is unavailable");
-        shutdown();
-        return false;
-    }
-
-    const float queuePriority = 1.0f;
-    VkDeviceQueueCreateInfo queueInfo{};
-    queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueInfo.queueFamilyIndex = impl_->graphicsFamily;
-    queueInfo.queueCount = 1;
-    queueInfo.pQueuePriorities = &queuePriority;
-
-    const char* swapchainExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-    VkDeviceCreateInfo deviceInfo{};
-    deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &queueInfo;
-    if (!impl_->headless) {
-        deviceInfo.enabledExtensionCount = 1;
-        deviceInfo.ppEnabledExtensionNames = &swapchainExtension;
-    }
-    if (vkCreateDevice(impl_->physicalDevice, &deviceInfo, nullptr, &impl_->device) != VK_SUCCESS) {
-        impl_->setError("vkCreateDevice failed");
-        shutdown();
-        return false;
-    }
-    vkGetDeviceQueue(impl_->device, impl_->graphicsFamily, 0, &impl_->queue);
     if (!impl_->headless) {
         impl_->createSwapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR>(
             vkGetDeviceProcAddr(impl_->device, "vkCreateSwapchainKHR"));
@@ -3464,8 +2313,8 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
             vkGetDeviceProcAddr(impl_->device, "vkQueuePresentKHR"));
     }
 
-    vkGetPhysicalDeviceMemoryProperties(impl_->physicalDevice, &impl_->memoryProperties);
     if (impl_->headless) {
+
         if (!chooseColorFormat(impl_->physicalDevice, impl_->colorFormat)) {
             impl_->setError("No supported Vulkan color attachment format");
             shutdown();
@@ -3488,48 +2337,31 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
             return false;
         }
     }
-    if (!impl_->createShadowRenderPass()) {
+    if (!impl_->createShadowResources()) {
         shutdown();
         return false;
     }
 
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = impl_->graphicsFamily;
-    if (vkCreateCommandPool(impl_->device, &poolInfo, nullptr, &impl_->commandPool) != VK_SUCCESS) {
+    if (!graphics_internal::Device::createCommandPool(impl_->device, impl_->graphicsFamily, impl_->commandPool)) {
         impl_->setError("vkCreateCommandPool failed");
         shutdown();
         return false;
     }
-
-    VkCommandBufferAllocateInfo commandBufferInfo{};
-    commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    commandBufferInfo.commandPool = impl_->commandPool;
-    commandBufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    commandBufferInfo.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(impl_->device, &commandBufferInfo, &impl_->commandBuffer) != VK_SUCCESS) {
+    if (!graphics_internal::Device::createCommandBuffer(impl_->device, impl_->commandPool, impl_->commandBuffer)) {
         impl_->setError("vkAllocateCommandBuffers failed");
         shutdown();
         return false;
     }
 
+
     if (!impl_->headless) {
-        VkSemaphoreCreateInfo semaphoreInfo{};
-        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        VkFenceCreateInfo fenceInfo{};
-        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // first frame has nothing to wait on
-        for (std::uint32_t slot = 0; slot < Impl::maxFramesInFlight; ++slot) {
-            if (vkCreateSemaphore(impl_->device, &semaphoreInfo, nullptr, &impl_->acquireSemaphores[slot]) != VK_SUCCESS ||
-                vkCreateSemaphore(impl_->device, &semaphoreInfo, nullptr, &impl_->renderFinishedSemaphores[slot]) != VK_SUCCESS ||
-                vkCreateFence(impl_->device, &fenceInfo, nullptr, &impl_->frameFences[slot]) != VK_SUCCESS) {
-                impl_->setError("vkCreateSemaphore/vkCreateFence failed");
-                shutdown();
-                return false;
-            }
+        if (!graphics_internal::Device::createFrameSync(impl_->device, impl_->frameSync)) {
+            impl_->setError("vkCreateSemaphore/vkCreateFence failed");
+            shutdown();
+            return false;
         }
     }
+
 
     if (!impl_->createRenderPass()) {
         shutdown();
@@ -3920,7 +2752,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     shadowPipelineInfo.pDepthStencilState = &shadowDepthStencil;
     shadowPipelineInfo.pDynamicState = &dynamicState;
     shadowPipelineInfo.layout = impl_->shadowPipelineLayout;
-    shadowPipelineInfo.renderPass = impl_->shadowRenderPass;
+    shadowPipelineInfo.renderPass = impl_->shadow.renderPass;
     shadowPipelineInfo.subpass = 0;
     if (vkCreateGraphicsPipelines(impl_->device, VK_NULL_HANDLE, 1, &shadowPipelineInfo, nullptr, &impl_->shadowPipeline) != VK_SUCCESS) {
         impl_->setError("vkCreateGraphicsPipelines(shadow) failed");
@@ -3980,7 +2812,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     VkPushConstantRange tonemapPushRange{};
     tonemapPushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     tonemapPushRange.offset = 0;
-    tonemapPushRange.size = sizeof(Impl::UiPushConstants);
+    tonemapPushRange.size = sizeof(graphics_internal::RectRenderer::PushConstants);
     tonemapPipelineLayoutInfo.pushConstantRangeCount = 1;
     tonemapPipelineLayoutInfo.pPushConstantRanges = &tonemapPushRange;
     if (vkCreatePipelineLayout(impl_->device, &tonemapPipelineLayoutInfo, nullptr, &impl_->tonemapPipelineLayout) != VK_SUCCESS) {
@@ -4164,7 +2996,7 @@ bool Graphics::renderHeadlessFrame() noexcept {
         impl_->lastError = "Headless frame requested for a native graphics context";
         return false;
     }
-    if (!impl_->recordFrame(impl_->framebuffer, renderWidth, renderHeight)) {
+    if (!impl_->renderFrameCommands(impl_->framebuffer, renderWidth, renderHeight)) {
         return false;
     }
 
@@ -4223,7 +3055,7 @@ bool Graphics::renderNativeFrame() noexcept {
     // buffer and semaphores are reused. Fence stays signaled until the frame
     // actually submits, so early-outs (recreate/acquire failure) never wedge
     // the slot.
-    if (vkWaitForFences(impl_->device, 1, &impl_->frameFences[frameSlot], VK_TRUE, std::numeric_limits<std::uint64_t>::max()) != VK_SUCCESS) {
+    if (vkWaitForFences(impl_->device, 1, &impl_->frameSync.fences[frameSlot], VK_TRUE, std::numeric_limits<std::uint64_t>::max()) != VK_SUCCESS) {
         impl_->lastError = "vkWaitForFences failed";
         return false;
     }
@@ -4242,7 +3074,7 @@ bool Graphics::renderNativeFrame() noexcept {
             impl_->device,
             impl_->swapchain,
             std::numeric_limits<std::uint64_t>::max(),
-            impl_->acquireSemaphores[frameSlot],
+            impl_->frameSync.acquire[frameSlot],
             VK_NULL_HANDLE,
             &imageIndex);
         if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR && attempt == 0) {
@@ -4268,25 +3100,25 @@ bool Graphics::renderNativeFrame() noexcept {
         return false;
     }
 
-    if (!impl_->recordFrame(impl_->swapchainFramebuffers[imageIndex], impl_->swapchainExtent.width, impl_->swapchainExtent.height)) {
+    if (!impl_->renderFrameCommands(impl_->swapchainFramebuffers[imageIndex], impl_->swapchainExtent.width, impl_->swapchainExtent.height)) {
         return false;
     }
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    if (vkResetFences(impl_->device, 1, &impl_->frameFences[frameSlot]) != VK_SUCCESS) {
+    if (vkResetFences(impl_->device, 1, &impl_->frameSync.fences[frameSlot]) != VK_SUCCESS) {
         impl_->lastError = "vkResetFences failed";
         return false;
     }
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = &impl_->acquireSemaphores[frameSlot];
+    submitInfo.pWaitSemaphores = &impl_->frameSync.acquire[frameSlot];
     submitInfo.pWaitDstStageMask = &waitStage;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &impl_->commandBuffer;
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &impl_->renderFinishedSemaphores[frameSlot];
-    if (vkQueueSubmit(impl_->queue, 1, &submitInfo, impl_->frameFences[frameSlot]) != VK_SUCCESS) {
+    submitInfo.pSignalSemaphores = &impl_->frameSync.renderFinished[frameSlot];
+    if (vkQueueSubmit(impl_->queue, 1, &submitInfo, impl_->frameSync.fences[frameSlot]) != VK_SUCCESS) {
         impl_->lastError = "vkQueueSubmit failed";
         return false;
     }
@@ -4294,7 +3126,7 @@ bool Graphics::renderNativeFrame() noexcept {
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &impl_->renderFinishedSemaphores[frameSlot];
+    presentInfo.pWaitSemaphores = &impl_->frameSync.renderFinished[frameSlot];
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &impl_->swapchain;
     presentInfo.pImageIndices = &imageIndex;
@@ -4339,24 +3171,24 @@ TextureHandle Graphics::createTexture2D(const TextureDesc& description) {
 
     const std::uint64_t id = impl_->nextTextureId++;
     if (impl_->textures.find(id) != impl_->textures.end()) {
-        impl_->destroyTextureResource(texture);
+        graphics_internal::TextureManager::destroyResource(impl_->device, texture);
         impl_->setError("Texture handle allocation failed");
         return invalidTextureHandle;
     }
     try {
         const auto result = impl_->textures.emplace(id, std::move(texture));
         if (!result.second) {
-            impl_->destroyTextureResource(texture);
+            graphics_internal::TextureManager::destroyResource(impl_->device, texture);
             impl_->setError("Texture handle allocation failed");
             return invalidTextureHandle;
         }
     } catch (...) {
         const auto textureIt = impl_->textures.find(id);
         if (textureIt != impl_->textures.end()) {
-            impl_->destroyTextureResource(textureIt->second);
+            graphics_internal::TextureManager::destroyResource(impl_->device, textureIt->second);
             impl_->textures.erase(textureIt);
         } else {
-            impl_->destroyTextureResource(texture);
+        graphics_internal::TextureManager::destroyResource(impl_->device, texture);
         }
         impl_->setError("Texture resource allocation failed");
         return invalidTextureHandle;
@@ -4366,7 +3198,7 @@ TextureHandle Graphics::createTexture2D(const TextureDesc& description) {
     if (!impl_->bindTextureDescriptor(handle)) {
         const auto textureIt = impl_->textures.find(id);
         if (textureIt != impl_->textures.end()) {
-            impl_->destroyTextureResource(textureIt->second);
+            graphics_internal::TextureManager::destroyResource(impl_->device, textureIt->second);
             impl_->textures.erase(textureIt);
         }
         return invalidTextureHandle;
@@ -4444,7 +3276,7 @@ void Graphics::destroyTexture2D(TextureHandle handle) noexcept {
     if (impl_->boundTexture == handle && !impl_->bindTextureDescriptor(impl_->defaultTexture)) {
         return;
     }
-    impl_->destroyTextureResource(textureIt->second);
+    graphics_internal::TextureManager::destroyResource(impl_->device, textureIt->second);
     impl_->textures.erase(textureIt);
     impl_->refreshSceneTextureBinding();
 }
@@ -4490,7 +3322,7 @@ MeshHandle Graphics::createMesh(const MeshData& data) {
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             mesh.vertexBuffer,
             mesh.vertexMemory)) {
-        impl_->destroyMeshResource(mesh);
+        graphics_internal::MeshRenderer::destroyResource(impl_->device, mesh);
         return invalidMeshHandle;
     }
     if (!impl_->createBufferWithData(
@@ -4499,7 +3331,7 @@ MeshHandle Graphics::createMesh(const MeshData& data) {
             VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             mesh.indexBuffer,
             mesh.indexMemory)) {
-        impl_->destroyMeshResource(mesh);
+        graphics_internal::MeshRenderer::destroyResource(impl_->device, mesh);
         return invalidMeshHandle;
     }
     mesh.vertexCount = static_cast<std::uint32_t>(data.vertices.size());
@@ -4539,7 +3371,7 @@ void Graphics::destroyMesh(MeshHandle handle) noexcept {
     if (impl_->device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(impl_->device);
     }
-    impl_->destroyMeshResource(meshIt->second);
+    graphics_internal::MeshRenderer::destroyResource(impl_->device, meshIt->second);
     impl_->meshes.erase(meshIt);
 }
 
@@ -4769,3 +3601,5 @@ const std::string& Graphics::lastError() const noexcept {
 }
 
 }
+
+

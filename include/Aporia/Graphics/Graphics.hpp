@@ -188,10 +188,27 @@ enum class UiTextAtlasMode : std::uint8_t {
     Msdf = 1,
 };
 
+struct UiGlyph {
+    std::uint32_t codePoint = 0;
+    float u0 = 0.0f;
+    float v0 = 0.0f;
+    float u1 = 0.0f;
+    float v1 = 0.0f;
+    float planeLeft = 0.0f;
+    float planeTop = 0.0f;
+    float planeWidth = 0.0f;
+    float planeHeight = 0.0f;
+    float advance = 0.0f;
+};
+
 struct UiTextAtlasDesc {
     TextureHandle texture;
     UiTextAtlasMode mode = UiTextAtlasMode::Msdf;
+    std::vector<UiGlyph> glyphs;
+    float emSize = 32.0f;
     float lineHeight = 16.0f;
+    float ascender = 0.95f;
+    float distanceRange = 4.0f;
 };
 
 struct UiTextRun {
@@ -200,6 +217,8 @@ struct UiTextRun {
     float y = 0.0f;
     float size = 16.0f;
     UiColor color{};
+    float outlineWidth = 0.0f;
+    UiColor outlineColor{};
 };
 
 struct UiDrawList {

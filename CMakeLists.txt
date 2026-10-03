@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 project(AporiaEngine VERSION 0.1.0 LANGUAGES CXX)
 
+if(NOT WIN32)
+    message(FATAL_ERROR "No support for non-Windows systems. Aporia Engine currently supports Windows only.")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -34,24 +38,30 @@ set(APORIA_SOURCES
 )
 
 if (APORIA_ENABLE_INPUT)
-    if (WIN32)
-        list(APPEND APORIA_SOURCES src/Platform/Win32/InputWin32.cpp)
-    else()
-        list(APPEND APORIA_SOURCES src/Platform/Stub/InputStub.cpp)
-    endif()
+    list(APPEND APORIA_SOURCES src/Platform/WIN32/InputWin32.cpp)
 endif()
 
 if (APORIA_ENABLE_PHYSICS)
-    list(APPEND APORIA_SOURCES src/Physics/PhysicsWorld.cpp src/Terrain/Terrain.cpp src/City/City.cpp)
+    list(APPEND APORIA_SOURCES
+        src/Physics/World/PhysicsWorld.cpp
+        src/Terrain/Terrain.cpp
+        src/Terrain/Generation/City/City.cpp)
 endif()
 
 if(APORIA_ENABLE_GRAPHICS)
-    list(APPEND APORIA_SOURCES src/Graphics/MeshPrimitives.cpp)
+    list(APPEND APORIA_SOURCES
+        src/Graphics/GlobalDrawer/MeshPrimitives.cpp
+        src/Graphics/GlobalDrawer/Device/Device.cpp
+        src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
+        src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
+        src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp
+        src/Graphics/GlobalDrawer/Hdr/HdrRenderer.cpp
+        src/Graphics/TextureManager/TextureManager.cpp)
 endif()
 
 if(APORIA_ENABLE_GRAPHICS)
     find_package(Vulkan REQUIRED)
-    list(APPEND APORIA_SOURCES src/Graphics/Graphics.cpp)
+    list(APPEND APORIA_SOURCES src/Graphics/GlobalDrawer/Graphics.cpp)
 
     set(APORIA_VULKAN_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders")
     set(APORIA_VULKAN_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/triangle.vert.spv")
