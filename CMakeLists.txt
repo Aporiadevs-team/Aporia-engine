@@ -16,6 +16,8 @@ option(APORIA_BUILD_RENDER_TESTS "Build tests/graphics render test projects (1: 
 option(APORIA_BUILD_VISIBLE_RENDER_TESTS "Build an interactive windowed Vulkan render test" OFF)
 option(APORIA_ENABLE_PHYSICS "Enable the physics module" ON)
 option(APORIA_ENABLE_INPUT "Enable the input module" ON)
+option(APORIA_INPUT_SDL3 "Build the SDL3 input source (needs SDL3::SDL3 target)" OFF)
+option(APORIA_INPUT_GLFW "Build the GLFW input source (needs GLFW headers)" OFF)
 option(APORIA_ENABLE_GRAPHICS "Enable the graphics module" OFF)
 option(APORIA_ENABLE_VULKAN "Enable the Vulkan backend" OFF)
 option(APORIA_ENABLE_VEHICLE "Enable the vehicle module" OFF)
@@ -38,12 +40,21 @@ set(APORIA_SOURCES
 )
 
 if (APORIA_ENABLE_INPUT)
-    list(APPEND APORIA_SOURCES src/Platform/WIN32/InputWin32.cpp)
+    list(APPEND APORIA_SOURCES src/Platform/Win32/Input/InputWin32.cpp)
+    if (APORIA_INPUT_SDL3)
+        list(APPEND APORIA_SOURCES src/Platform/SDL3/Input/InputSDL3.cpp)
+    endif()
+    if (APORIA_INPUT_GLFW)
+        list(APPEND APORIA_SOURCES src/Platform/Glfw/Input/InputGlfw.cpp)
+    endif()
 endif()
 
 if (APORIA_ENABLE_PHYSICS)
     list(APPEND APORIA_SOURCES
         src/Physics/World/PhysicsWorld.cpp
+        src/Physics/internal/PhysicsHelpers.cpp
+        src/Physics/internal/PhysicsContacts.cpp
+        src/Physics/internal/PhysicsRaycast.cpp
         src/Terrain/Terrain.cpp
         src/Terrain/Generation/City/City.cpp)
 endif()
@@ -204,6 +215,12 @@ endif()
 
 if (APORIA_ENABLE_INPUT)
     target_compile_definitions(AporiaEngine PUBLIC APORIA_ENGINE_HAS_INPUT)
+    if (APORIA_INPUT_SDL3 AND TARGET SDL3::SDL3)
+        target_link_libraries(AporiaEngine PRIVATE SDL3::SDL3)
+    endif()
+    if (APORIA_INPUT_GLFW AND TARGET glfw)
+        target_link_libraries(AporiaEngine PRIVATE glfw)
+    endif()
 endif()
 
 if(APORIA_ENABLE_GRAPHICS)
@@ -256,6 +273,7 @@ if (APORIA_BUILD_RENDER_TESTS)
     add_subdirectory(tests/graphics/6 aporia-render-test-6)
     add_subdirectory(tests/graphics/7 aporia-render-test-7)
     add_subdirectory(tests/graphics/8 aporia-render-test-8)
+    add_subdirectory(tests/graphics/9 aporia-render-test-9)
 endif()
 
 if(APORIA_BUILD_VISIBLE_RENDER_TESTS)

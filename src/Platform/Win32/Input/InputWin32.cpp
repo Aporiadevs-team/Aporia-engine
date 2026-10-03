@@ -110,6 +110,13 @@ private:
         case KeyCode::D: return 'D';
         case KeyCode::Q: return 'Q';
         case KeyCode::E: return 'E';
+        case KeyCode::R: return 'R';
+        case KeyCode::U: return 'U';
+        case KeyCode::X: return 'X';
+        case KeyCode::M: return 'M';
+        case KeyCode::Digit1: return '1';
+        case KeyCode::Digit2: return '2';
+        case KeyCode::Digit3: return '3';
         case KeyCode::Space: return VK_SPACE;
         case KeyCode::Shift: return VK_SHIFT;
         case KeyCode::Control: return VK_CONTROL;

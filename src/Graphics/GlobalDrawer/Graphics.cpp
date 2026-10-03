@@ -99,8 +99,8 @@ void traceFrame(
 
 namespace {
 
-constexpr std::uint32_t renderWidth = 64;
-constexpr std::uint32_t renderHeight = 64;
+// Offscreen target edge used when GraphicsConfig leaves the headless size at 0.
+constexpr std::uint32_t kDefaultHeadlessExtent = 64;
 
 using Aporia::graphics_internal::qualityParameters;
 using Aporia::graphics_internal::QualityParameters;
@@ -354,6 +354,12 @@ struct Graphics::Impl {
     std::uint32_t hdrWidth = 0;
     std::uint32_t hdrHeight = 0;
     VkFormat hdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+    // Headless main target size. Members shadow the 64x64 defaults for every
+    // Impl member function; Graphics::readbackPixels reads them explicitly.
+    std::uint32_t renderWidth = kDefaultHeadlessExtent;
+    std::uint32_t renderHeight = kDefaultHeadlessExtent;
+
 
     // Planar reflection target: mirrored scene rendered from the reflected
     // camera. Sized reflectionScale relative to the main target.
@@ -2096,6 +2102,9 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->frameCount = 0;
     impl_->presentCount = 0;
     impl_->headless = config.headless;
+    impl_->renderWidth = config.headlessWidth > 0 ? config.headlessWidth : kDefaultHeadlessExtent;
+    impl_->renderHeight = config.headlessHeight > 0 ? config.headlessHeight : kDefaultHeadlessExtent;
+
     impl_->validationMessageCount = 0;
     impl_->environment.sunDirection[0] = config.sunDirection[0];
     impl_->environment.sunDirection[1] = config.sunDirection[1];
@@ -2932,7 +2941,8 @@ bool Graphics::renderHeadlessFrame() noexcept {
         impl_->lastError = "Headless frame requested for a native graphics context";
         return false;
     }
-    if (!impl_->renderFrameCommands(impl_->framebuffer, renderWidth, renderHeight)) {
+    if (!impl_->renderFrameCommands(impl_->framebuffer, impl_->renderWidth, impl_->renderHeight)) {
+
         return false;
     }
 
@@ -3444,8 +3454,9 @@ bool Graphics::readbackPixels(std::vector<std::uint8_t>& pixels) const {
         return false;
     }
 
-    constexpr VkDeviceSize byteCount =
-        static_cast<VkDeviceSize>(renderWidth) * static_cast<VkDeviceSize>(renderHeight) * 4;
+    const VkDeviceSize byteCount =
+        static_cast<VkDeviceSize>(impl_->renderWidth) * static_cast<VkDeviceSize>(impl_->renderHeight) * 4;
+
     pixels.assign(static_cast<std::size_t>(byteCount), 0);
 
     VkBuffer dstBuffer = VK_NULL_HANDLE;
@@ -3532,7 +3543,8 @@ bool Graphics::readbackPixels(std::vector<std::uint8_t>& pixels) const {
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
-    region.imageExtent = {renderWidth, renderHeight, 1};
+    region.imageExtent = {impl_->renderWidth, impl_->renderHeight, 1};
+
     vkCmdCopyImageToBuffer(impl_->commandBuffer, impl_->colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstBuffer, 1, &region);
 
     VkImageMemoryBarrier backToAttachment{};

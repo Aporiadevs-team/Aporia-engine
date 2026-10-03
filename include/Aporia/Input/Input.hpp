@@ -15,6 +15,13 @@ enum class KeyCode : std::uint16_t {
     D,
     Q,
     E,
+    R,
+    U,
+    X,
+    M,
+    Digit1,
+    Digit2,
+    Digit3,
     Space,
     Shift,
     Control,
@@ -88,5 +95,13 @@ private:
 
 // Win32 polled source bound to a native window (HWND). Returns nullptr off Windows.
 APORIA_API std::unique_ptr<Input::Source> makeWin32InputSource(std::uintptr_t nativeWindow);
+
+// SDL3 polled source bound to an SDL_Window*. Only available when the engine is
+// built with APORIA_INPUT_SDL3; returns nullptr otherwise or for a null window.
+APORIA_API std::unique_ptr<Input::Source> makeSDL3InputSource(void* sdlWindow);
+
+// GLFW polled source bound to a GLFWwindow*. Only available when the engine is
+// built with APORIA_INPUT_GLFW and GLFW headers are present.
+APORIA_API std::unique_ptr<Input::Source> makeGlfwInputSource(void* glfwWindow);
 
 }

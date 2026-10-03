@@ -249,6 +249,10 @@ struct UiDrawList {
 
 struct GraphicsConfig {
     bool headless = true;
+    // Offscreen target size for headless runs; 0 keeps the small 64x64 default.
+    // Native targets always follow the window client area instead.
+    std::uint32_t headlessWidth = 0;
+    std::uint32_t headlessHeight = 0;
     bool enableValidation = false;
     bool showWindow = false; // keep a host-owned native window visible during render tests
     GraphicsQuality quality = GraphicsQuality::Medium;

@@ -72,6 +72,21 @@ struct ContactInfo {
     double impulse = 0.0;
 };
 
+// Steering model for the body-turn predictor. The host only supplies a driver
+// request in [-1, 1]; PhysicsWorld smooths the wheel, then derives the yaw rate
+// from the bicycle model, capped by grip, gravity on the body's tilt and the
+// body's own inertia/shape. No engine "vehicle" entity exists: any Body X can
+// opt into steering.
+struct SteeringConfig {
+    double maxSteerAngle = 0.5;     // rad, full wheel lock
+    double steerRate = 1.8;         // rad/s the wheel travels toward lock
+    double steerReturn = 3.5;       // rad/s the wheel recenters hands-off
+    double wheelbase = 0.0;         // m; <= 0 derives it from the body shape
+    double gripLimit = 8.5;         // m/s^2 lateral grip on flat ground (~0.9 g)
+    double slopeInfluence = 0.6;    // how strongly a tilt steers the heading
+    double yawResponse = 5.0;       // 1/s, how fast the body reaches target yaw
+};
+
 class APORIA_API PhysicsWorld {
 public:
     explicit PhysicsWorld(const Vec3& gravity = Vec3{0.0, 0.0, -9.81});
@@ -95,15 +110,33 @@ public:
     // Surface elevation under a world point (descriptor transform applied).
     [[nodiscard]] double heightfieldHeightAt(const TerrainHeightfield& field, const Vec3& worldPoint) const noexcept;
 
+    // Same, but uses the heightfield body's stored (possibly rotated/placed)
+    // descriptor, so the result is correct for non-identity transforms.
+    [[nodiscard]] double heightfieldHeightAt(BodyHandle body, const Vec3& worldPoint) const noexcept;
+
     void setGravity(const Vec3& gravity) noexcept;
     [[nodiscard]] Vec3 gravity() const noexcept;
 
     void applyForce(BodyHandle body, const Vec3& force) noexcept;
     void applyTorque(BodyHandle body, const Vec3& torque) noexcept;
+
+    // Steering predictor. `steerInput` is the driver request in [-1, 1]; calling
+    // it enables steering on the body. The wheel angle is integrated smoothly on
+    // each substep and a physically limited yaw rate is applied about the body's
+    // up axis, accounting for speed (no turn at rest), mass/inertia, the tilt
+    // against the terrain and the body's wheelbase/track shape.
+    void setBodySteering(BodyHandle body, double steerInput, const SteeringConfig& config = {}) noexcept;
+    void disableBodySteering(BodyHandle body) noexcept;
+    void setBodySteeringConfig(BodyHandle body, const SteeringConfig& config) noexcept;
+    [[nodiscard]] double bodySteeringAngle(BodyHandle body) const noexcept;
+    [[nodiscard]] double bodyYawRate(BodyHandle body) const noexcept;
+
     void setBodyPosition(BodyHandle body, const Vec3& position) noexcept;
     void setBodyVelocity(BodyHandle body, const Vec3& velocity) noexcept;
     void setBodyOrientation(BodyHandle body, const Quat& orientation) noexcept;
     void setBodyAngularVelocity(BodyHandle body, const Vec3& angularVelocity) noexcept;
+    void setBodyFriction(BodyHandle body, double friction) noexcept;
+    void setBodyRestitution(BodyHandle body, double restitution) noexcept;
 
     [[nodiscard]] Vec3 bodyPosition(BodyHandle body) const noexcept;
     [[nodiscard]] Vec3 bodyVelocity(BodyHandle body) const noexcept;
