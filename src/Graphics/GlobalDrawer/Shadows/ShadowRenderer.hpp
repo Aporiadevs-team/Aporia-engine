@@ -61,6 +61,15 @@ public:
         const std::vector<RenderItem>& items,
         const std::unordered_map<std::uint64_t, MeshRenderer::Resource>& meshes) noexcept;
 
+    // Builds the sun view-projection, snapped to the shadow texel grid so the
+    // map does not swim when the camera moves.
+    static void buildSunMatrix(
+        const float sunDirection[3],
+        const double cameraPosition[3],
+        float shadowExtent,
+        std::uint32_t mapSize,
+        float outMatrix[16]) noexcept;
+
     void setConfig(const ShadowConfig& config) noexcept { config_ = config; }
     [[nodiscard]] const ShadowConfig& config() const noexcept { return config_; }
     void setPlayerUltra(bool enabled) noexcept { playerUltra_ = enabled; }

@@ -1,4 +1,9 @@
 #include "ShadowRenderer.hpp"
+#include "Aporia/Math/Matrix4.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 
 namespace Aporia::graphics_internal {
 
@@ -218,6 +223,54 @@ void ShadowRenderer::renderShadowMap(
     MeshRenderer::renderMeshes(context.commandBuffer, VK_NULL_HANDLE, context.pipelineLayout,
                                context.descriptorSet, sunMatrix, items, meshes, context.pipeline);
     vkCmdEndRenderPass(context.commandBuffer);
+}
+
+void ShadowRenderer::buildSunMatrix(
+        const float sunDirectionIn[3],
+        const double cameraPositionIn[3],
+        float shadowExtent,
+        std::uint32_t mapSize,
+        float outMatrix[16]) noexcept {
+    float directionX = sunDirectionIn[0];
+    float directionY = sunDirectionIn[1];
+    float directionZ = sunDirectionIn[2];
+    const float length = std::sqrt(directionX * directionX + directionY * directionY + directionZ * directionZ);
+    if (length <= 1.0e-6f) {
+        directionX = 0.35f;
+        directionY = -0.5f;
+        directionZ = 0.8f;
+    } else {
+        directionX /= length;
+        directionY /= length;
+        directionZ /= length;
+    }
+    if (std::abs(directionZ) > 0.999f) {
+        directionZ = directionZ > 0.0f ? 0.999f : -0.999f;
+    }
+
+    const Aporia::Vec3 sunDirection(directionX, directionY, directionZ);
+    const Aporia::Vec3 cameraPosition(cameraPositionIn[0], cameraPositionIn[1], cameraPositionIn[2]);
+    Aporia::Vec3 center = cameraPosition;
+    const Aporia::Vec3 up = std::abs(directionZ) < 0.9f ? Aporia::Vec3(0.0, 0.0, 1.0) : Aporia::Vec3(1.0, 0.0, 0.0);
+    const Aporia::Vec3 lightEye = center + sunDirection * 60.0;
+    const Aporia::Mat4 unsnappedView = Aporia::Mat4::lookAt(lightEye, center, up);
+    const Aporia::Vec3 right{unsnappedView.m[0][0], unsnappedView.m[1][0], unsnappedView.m[2][0]};
+    const Aporia::Vec3 correctedUp{unsnappedView.m[0][1], unsnappedView.m[1][1], unsnappedView.m[2][1]};
+    const Aporia::Vec3 offset = center - lightEye;
+    const double lightX = dot(right, offset);
+    const double lightY = dot(correctedUp, offset);
+    const double extent = std::max(1.0, static_cast<double>(shadowExtent));
+    const double texelWorldSize = (extent * 2.0) / static_cast<double>(std::max(1u, mapSize));
+    if (texelWorldSize > 0.0) {
+        const double snappedX = std::round(lightX / texelWorldSize) * texelWorldSize;
+        const double snappedY = std::round(lightY / texelWorldSize) * texelWorldSize;
+        center += right * (snappedX - lightX) + correctedUp * (snappedY - lightY);
+    }
+    const Aporia::Vec3 eye = center + sunDirection * 60.0;
+    const Aporia::Mat4 view = Aporia::Mat4::lookAt(eye, center, up);
+    const Aporia::Mat4 projection = Aporia::Mat4::orthographicVulkan(extent * 2.0, extent * 2.0, 0.1, 200.0);
+    const Aporia::Mat4 sunViewProj = projection * view;
+    std::memcpy(outMatrix, &sunViewProj, sizeof(sunViewProj));
 }
 
 } // namespace Aporia::graphics_internal

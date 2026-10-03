@@ -51,6 +51,7 @@ endif()
 if(APORIA_ENABLE_GRAPHICS)
     list(APPEND APORIA_SOURCES
         src/Graphics/GlobalDrawer/MeshPrimitives.cpp
+        src/Graphics/GlobalDrawer/Support/Support.cpp
         src/Graphics/GlobalDrawer/Device/Device.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
