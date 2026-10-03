@@ -25,7 +25,7 @@ bool findMemoryType(
     return false;
 }
 
-std::uint32_t decodeUtf8(const std::string& text, std::size_t& index) noexcept {
+std::uint32_t decodeUtf8(std::string_view text, std::size_t& index) noexcept {
     const auto byte = [&](std::size_t at) { return static_cast<unsigned char>(text[at]); };
     const unsigned char lead = byte(index);
     if (lead < 0x80) {
@@ -336,7 +336,7 @@ float TextRenderer::lineHeight(const UiTextAtlasDesc& atlas, float size) const n
 
 float TextRenderer::measureText(
         const UiTextAtlasDesc& atlas,
-        const std::string& text,
+        std::string_view text,
         float size) const {
     const float em = atlas.emSize > 0.0f ? atlas.emSize : 32.0f;
     const float scale = size / em;
@@ -359,7 +359,7 @@ float TextRenderer::measureText(
 
 std::vector<TextGlyph> TextRenderer::layoutText(
         const UiTextAtlasDesc& atlas,
-        const std::string& text,
+        std::string_view text,
         float x,
         float y,
         float size,
@@ -419,34 +419,39 @@ void TextRenderer::renderText(
         float guiScale,
         float outlineWidth,
         const TextColor& outlineColor,
-        const std::vector<TextGlyph>& glyphs) const noexcept {
+        const std::vector<TextGlyph>& glyphs,
+        std::uint64_t signature) noexcept {
     if (commandBuffer == VK_NULL_HANDLE || glyphs.empty() || device_ == VK_NULL_HANDLE) {
         return;
     }
-    const Slot& slot = slots_[frameSlot % SlotCount];
+    Slot& slot = slots_[frameSlot % SlotCount];
     if (slot.mapped == nullptr) {
         return;
     }
     const std::size_t count = glyphs.size() < MaxGlyphs ? glyphs.size() : MaxGlyphs;
 
-    FontUniforms uniforms{};
-    uniforms.screenData[0] = screenWidth;
-    uniforms.screenData[1] = screenHeight;
-    uniforms.screenData[2] = guiScale;
-    uniforms.screenData[3] = outlineWidth;
-    uniforms.outlineColor[0] = outlineColor.r;
-    uniforms.outlineColor[1] = outlineColor.g;
-    uniforms.outlineColor[2] = outlineColor.b;
-    uniforms.outlineColor[3] = outlineColor.a;
-    uniforms.atlasData[0] = atlas_.width;
-    uniforms.atlasData[1] = atlas_.height;
-    uniforms.atlasData[2] = atlas_.distanceRange;
-    uniforms.atlasData[3] = atlas_.fontSize;
-    uniforms.charCount[0] = static_cast<std::int32_t>(count);
+    // Persistent batch: identical content for this slot needs no re-upload.
+    if (signature == 0 || signature != slot.uploadedSignature) {
+        FontUniforms uniforms{};
+        uniforms.screenData[0] = screenWidth;
+        uniforms.screenData[1] = screenHeight;
+        uniforms.screenData[2] = guiScale;
+        uniforms.screenData[3] = outlineWidth;
+        uniforms.outlineColor[0] = outlineColor.r;
+        uniforms.outlineColor[1] = outlineColor.g;
+        uniforms.outlineColor[2] = outlineColor.b;
+        uniforms.outlineColor[3] = outlineColor.a;
+        uniforms.atlasData[0] = atlas_.width;
+        uniforms.atlasData[1] = atlas_.height;
+        uniforms.atlasData[2] = atlas_.distanceRange;
+        uniforms.atlasData[3] = atlas_.fontSize;
+        uniforms.charCount[0] = static_cast<std::int32_t>(count);
 
-    std::memcpy(slot.mapped, &uniforms, sizeof(uniforms));
-    std::memcpy(static_cast<std::uint8_t*>(slot.mapped) + sizeof(uniforms),
-                glyphs.data(), count * sizeof(TextGlyph));
+        std::memcpy(slot.mapped, &uniforms, sizeof(uniforms));
+        std::memcpy(static_cast<std::uint8_t*>(slot.mapped) + sizeof(uniforms),
+                    glyphs.data(), count * sizeof(TextGlyph));
+        slot.uploadedSignature = signature;
+    }
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       mode_ == Mode::Ttf ? ttfPipeline_ : msdfPipeline_);

@@ -1,5 +1,6 @@
 #include "Support.hpp"
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 
@@ -134,7 +135,8 @@ bool chooseSurfaceFormat(
 
 VkPresentModeKHR choosePresentMode(
         VkPhysicalDevice physicalDevice,
-        VkSurfaceKHR surface) {
+        VkSurfaceKHR surface,
+        bool vsync) {
     std::uint32_t count = 0;
     if (vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, nullptr) != VK_SUCCESS || count == 0) {
         return VK_PRESENT_MODE_IMMEDIATE_KHR;
@@ -143,15 +145,26 @@ VkPresentModeKHR choosePresentMode(
     if (vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, modes.data()) != VK_SUCCESS) {
         return VK_PRESENT_MODE_IMMEDIATE_KHR;
     }
-    for (const VkPresentModeKHR mode : modes) {
-        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-            return mode;
+
+    const auto has = [&](VkPresentModeKHR mode) {
+        return std::find(modes.begin(), modes.end(), mode) != modes.end();
+    };
+
+    if (vsync) {
+        // FIFO is the only mode guaranteed to be present and it blocks on the
+        // refresh, which is exactly vsync.
+        if (has(VK_PRESENT_MODE_FIFO_KHR)) {
+            return VK_PRESENT_MODE_FIFO_KHR;
         }
+        return modes.front();
     }
-    for (const VkPresentModeKHR mode : modes) {
-        if (mode == VK_PRESENT_MODE_FIFO_KHR) {
-            return mode;
-        }
+
+    // Vsync off: prefer MAILBOX (uncapped, no tearing), then IMMEDIATE.
+    if (has(VK_PRESENT_MODE_MAILBOX_KHR)) {
+        return VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    if (has(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
     }
     return modes.front();
 }

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -85,6 +86,22 @@ private:
 };
 
 inline constexpr MeshHandle invalidMeshHandle{};
+
+class APORIA_API FontHandle {
+public:
+    constexpr FontHandle() noexcept = default;
+    constexpr explicit FontHandle(std::uint64_t value) noexcept : value_(value) {}
+
+    [[nodiscard]] constexpr std::uint64_t value() const noexcept { return value_; }
+    [[nodiscard]] constexpr bool valid() const noexcept { return value_ != 0; }
+
+    friend constexpr bool operator==(FontHandle, FontHandle) noexcept = default;
+
+private:
+    std::uint64_t value_ = 0;
+};
+
+inline constexpr FontHandle invalidFontHandle{};
 
 // View parameters for one frame. Matrices are column-major float32 in Vulkan
 // clip space (see Mat4::perspectiveVulkan); copy from Mat4 with memcpy.
@@ -212,7 +229,7 @@ struct UiTextAtlasDesc {
 };
 
 struct UiTextRun {
-    std::string text;
+    std::string_view text; // non-owning: caller keeps the storage alive for the frame
     float x = 0.0f;
     float y = 0.0f;
     float size = 16.0f;
@@ -225,6 +242,7 @@ struct UiDrawList {
     std::vector<std::pair<UiRect, UiColor>> roundedRects;
     std::vector<UiTextRun> textRuns;
     UiTextAtlasDesc textAtlas{};
+    FontHandle font{};
     float cornerRadius = 0.0f;
     BlurConfig blur{};
 };
@@ -292,6 +310,11 @@ public:
     void enablePlayerUltraShadows(bool enabled) noexcept;
     [[nodiscard]] bool playerUltraShadowsEnabled() const noexcept;
 
+    // Presentation vsync. Off selects MAILBOX/IMMEDIATE; on selects FIFO.
+    // Recreates the swapchain when a native window is active.
+    void setVsync(bool enabled) noexcept;
+    [[nodiscard]] bool vsync() const noexcept;
+
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] bool renderFrame() noexcept;
     [[nodiscard]] bool renderHeadlessFrame() noexcept;
@@ -322,6 +345,13 @@ public:
     MeshHandle createMesh(const MeshData& data);
     void destroyMesh(MeshHandle handle) noexcept;
     [[nodiscard]] std::uint64_t meshVertexCount(MeshHandle handle) const noexcept;
+
+    // Bakes a TTF/OTF into an alpha coverage atlas and registers it as a font.
+    FontHandle createFontFromTtf(const std::string& ttfPath, float pixelSize = 32.0f);
+    // Loads an msdf-atlas-gen JSON description plus its PNG atlas.
+    FontHandle createFontFromMsdf(const std::string& jsonPath, const std::string& pngPath);
+    void destroyFont(FontHandle handle) noexcept;
+    [[nodiscard]] bool fontValid(FontHandle handle) const noexcept;
 
     [[nodiscard]] GraphicsStats stats() const noexcept;
     [[nodiscard]] const std::string& lastError() const noexcept;

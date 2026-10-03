@@ -10,6 +10,7 @@
 #include "Aporia/Graphics/Graphics.hpp"
 #include "Device/Device.hpp"
 #include "Support/Support.hpp"
+#include "Text/FontAtlasBuilder.hpp"
 #include "Hdr/HdrRenderer.hpp"
 #include "Meshes/MeshRenderer.hpp"
 #include "Rectangulars/RectRenderer.hpp"
@@ -252,6 +253,11 @@ struct Graphics::Impl {
     Aporia::EnvironmentState environment{};
     Aporia::UiDrawList uiDrawList{};
     Aporia::BlurConfig blurConfig{};
+    // Persistent text batch: laid-out glyphs are reused while the draw list
+    // content is unchanged, so static HUD/menus skip layout and UBO upload.
+    std::vector<graphics_internal::TextGlyph> cachedUiGlyphs;
+    std::uint64_t cachedUiTextSignature = 0;
+    bool cachedUiTextValid = false;
 
     VkImage depthImage = VK_NULL_HANDLE;
     VkDeviceMemory depthMemory = VK_NULL_HANDLE;
@@ -326,6 +332,13 @@ struct Graphics::Impl {
     TextureHandle boundTexture;
     std::uint64_t nextTextureId = 1;
     std::uint64_t textureUploadCount = 0;
+
+    struct FontResource {
+        TextureHandle texture;
+        Aporia::UiTextAtlasDesc atlas;
+    };
+    std::unordered_map<std::uint64_t, FontResource> fonts;
+    std::uint64_t nextFontId = 1;
 
     // HDR scene target: all meshes render here; tonemap pass copies it to the
     // final target.    // final color target. At Low quality the mesh pass renders straight to the
@@ -922,6 +935,7 @@ struct Graphics::Impl {
             setError("Texture resource creation failed");
             return false;
         }
+        ++textureUploadCount;
         return true;
     }
 
@@ -1261,7 +1275,7 @@ struct Graphics::Impl {
         surfaceFormat = selectedFormat;
         swapchainColorSpace = selectedFormat.colorSpace;
         colorFormat = selectedFormat.format;
-        presentMode = choosePresentMode(physicalDevice, surface);
+        presentMode = choosePresentMode(physicalDevice, surface, deviceService.vsync);
         return true;
 #endif
     }
@@ -1615,7 +1629,19 @@ struct Graphics::Impl {
         if (!textRenderer.initialized() || uiDrawList.textRuns.empty()) {
             return;
         }
-        const auto textureIt = textures.find(uiDrawList.textAtlas.texture.value());
+
+        const UiTextAtlasDesc* atlasDesc = &uiDrawList.textAtlas;
+        TextureHandle atlasTextureHandle = uiDrawList.textAtlas.texture;
+        if (uiDrawList.font.valid()) {
+            const auto fontIt = fonts.find(uiDrawList.font.value());
+            if (fontIt == fonts.end()) {
+                return;
+            }
+            atlasDesc = &fontIt->second.atlas;
+            atlasTextureHandle = fontIt->second.texture;
+        }
+
+        const auto textureIt = textures.find(atlasTextureHandle.value());
         if (textureIt == textures.end() || textureIt->second.view == VK_NULL_HANDLE) {
             return;
         }
@@ -1624,24 +1650,80 @@ struct Graphics::Impl {
         atlasTexture.sampler = textureIt->second.sampler;
         atlasTexture.width = static_cast<float>(textureIt->second.width);
         atlasTexture.height = static_cast<float>(textureIt->second.height);
-        atlasTexture.distanceRange = uiDrawList.textAtlas.distanceRange;
-        atlasTexture.fontSize = uiDrawList.textAtlas.emSize;
-        textRenderer.setMode(uiDrawList.textAtlas.mode == UiTextAtlasMode::TtfBitmap
+        atlasTexture.distanceRange = atlasDesc->distanceRange;
+        atlasTexture.fontSize = atlasDesc->emSize;
+        textRenderer.setMode(atlasDesc->mode == UiTextAtlasMode::TtfBitmap
             ? graphics_internal::TextRenderer::Mode::Ttf
             : graphics_internal::TextRenderer::Mode::Msdf);
         textRenderer.setAtlasTexture(atlasTexture);
 
+        // Signature over everything that affects the glyph batch: the atlas and
+        // each run's text/position/size/color. Unchanged content reuses the
+        // cached layout and the TextRenderer skips the UBO upload.
+        const auto hashBytes = [](std::uint64_t hash, const void* data, std::size_t size) noexcept {
+            const auto* bytes = static_cast<const std::uint8_t*>(data);
+            for (std::size_t index = 0; index < size; ++index) {
+                hash ^= bytes[index];
+                hash *= 1099511628211ull;
+            }
+            return hash;
+        };
+        std::uint64_t signature = 1469598103934665603ull;
+        const std::uint64_t fontValue = uiDrawList.font.value();
+        signature = hashBytes(signature, &fontValue, sizeof(fontValue));
+        const auto hashFloat = [&](float value) { return hashBytes(signature, &value, sizeof(value)); };
+        signature = hashFloat(static_cast<float>(atlasDesc->mode));
+        signature = hashFloat(atlasDesc->emSize);
+        signature = hashFloat(atlasDesc->distanceRange);
+        signature = hashFloat(atlasDesc->lineHeight);
+        signature = hashFloat(atlasDesc->ascender);
         for (const UiTextRun& run : uiDrawList.textRuns) {
-            const graphics_internal::TextColor color{run.color.r, run.color.g, run.color.b, run.color.a};
-            const graphics_internal::TextColor outline{
-                run.outlineColor.r, run.outlineColor.g, run.outlineColor.b, run.outlineColor.a};
-            const std::vector<graphics_internal::TextGlyph> glyphs = textRenderer.layoutText(
-                uiDrawList.textAtlas, run.text, run.x, run.y, run.size, color,
-                run.outlineWidth, outline);
-            textRenderer.renderText(buffer, currentFrameSlot,
-                                    static_cast<float>(width), static_cast<float>(height),
-                                    1.0f, run.outlineWidth, outline, glyphs);
+            signature = hashBytes(signature, run.text.data(), run.text.size());
+            signature = hashFloat(run.x);
+            signature = hashFloat(run.y);
+            signature = hashFloat(run.size);
+            signature = hashFloat(run.outlineWidth);
+            signature = hashFloat(run.color.r);
+            signature = hashFloat(run.color.g);
+            signature = hashFloat(run.color.b);
+            signature = hashFloat(run.color.a);
+            signature = hashFloat(run.outlineColor.r);
+            signature = hashFloat(run.outlineColor.g);
+            signature = hashFloat(run.outlineColor.b);
+            signature = hashFloat(run.outlineColor.a);
         }
+
+        float outlineWidth = 0.0f;
+        graphics_internal::TextColor outlineColor{};
+        if (!cachedUiTextValid || signature != cachedUiTextSignature) {
+            cachedUiGlyphs.clear();
+            for (const UiTextRun& run : uiDrawList.textRuns) {
+                const graphics_internal::TextColor color{run.color.r, run.color.g, run.color.b, run.color.a};
+                const graphics_internal::TextColor outline{
+                    run.outlineColor.r, run.outlineColor.g, run.outlineColor.b, run.outlineColor.a};
+                const std::vector<graphics_internal::TextGlyph> runGlyphs = textRenderer.layoutText(
+                    *atlasDesc, run.text, run.x, run.y, run.size, color, run.outlineWidth, outline);
+                cachedUiGlyphs.insert(cachedUiGlyphs.end(), runGlyphs.begin(), runGlyphs.end());
+                if (run.outlineWidth > 0.0f) {
+                    outlineWidth = run.outlineWidth;
+                    outlineColor = outline;
+                }
+            }
+            cachedUiTextSignature = signature;
+            cachedUiTextValid = true;
+        } else {
+            for (const UiTextRun& run : uiDrawList.textRuns) {
+                if (run.outlineWidth > 0.0f) {
+                    outlineWidth = run.outlineWidth;
+                    outlineColor = {run.outlineColor.r, run.outlineColor.g,
+                                    run.outlineColor.b, run.outlineColor.a};
+                }
+            }
+        }
+
+        textRenderer.renderText(buffer, currentFrameSlot,
+                                static_cast<float>(width), static_cast<float>(height),
+                                1.0f, outlineWidth, outlineColor, cachedUiGlyphs, signature);
     }
 
     void renderTonemap(VkFramebuffer target, std::uint32_t width, std::uint32_t height) {
@@ -1654,7 +1736,7 @@ struct Graphics::Impl {
         graphics_internal::HdrRenderer::renderTonemap(
             context, target, width, height,
             [this, width, height](VkCommandBuffer buffer, VkPipelineLayout layout) {
-                rectRenderer.draw(buffer, layout, width, height);
+                rectRenderer.draw(buffer, layout, width, height, uiDrawList);
                 renderUiText(buffer, width, height);
             });
     }
@@ -2789,9 +2871,26 @@ void Graphics::clearUiDrawList() noexcept {
     }
 }
 
+
 bool Graphics::playerUltraShadowsEnabled() const noexcept {
     return impl_ != nullptr && impl_->playerUltraShadows;
 }
+
+void Graphics::setVsync(bool enabled) noexcept {
+    if (!impl_) {
+        return;
+    }
+    impl_->deviceService.vsync = enabled;
+    if (!impl_->headless && initialized()) {
+        impl_->configureNativeSurface();
+        impl_->recreateSwapchain();
+    }
+}
+
+bool Graphics::vsync() const noexcept {
+    return impl_ != nullptr && impl_->deviceService.vsync;
+}
+
 
 bool Graphics::initialized() const noexcept {
     return impl_ && impl_->instance != VK_NULL_HANDLE && impl_->device != VK_NULL_HANDLE && impl_->pipeline != VK_NULL_HANDLE;
@@ -3219,6 +3318,102 @@ std::uint64_t Graphics::meshVertexCount(MeshHandle handle) const noexcept {
     const auto meshIt = impl_->meshes.find(handle.value());
     return meshIt == impl_->meshes.end() ? 0 : meshIt->second.vertexCount;
 }
+
+FontHandle Graphics::createFontFromTtf(const std::string& ttfPath, float pixelSize) {
+    if (!impl_) {
+        return invalidFontHandle;
+    }
+    if (!initialized()) {
+        impl_->setError("Graphics is not initialized");
+        return invalidFontHandle;
+    }
+    const std::vector<std::uint8_t> bytes = graphics_internal::readFileBytes(ttfPath);
+    if (bytes.empty()) {
+        impl_->setError("TTF file could not be read");
+        return invalidFontHandle;
+    }
+    graphics_internal::BakedFontAtlas baked = graphics_internal::bakeTtfAtlas(bytes, pixelSize);
+    if (baked.pixels.empty() || baked.atlas.glyphs.empty()) {
+        impl_->setError("TTF atlas baking failed");
+        return invalidFontHandle;
+    }
+
+    TextureDesc textureDescription;
+    textureDescription.width = baked.width;
+    textureDescription.height = baked.height;
+    textureDescription.format = TextureFormat::Rgba8Unorm;
+    textureDescription.pixels = baked.pixels.data();
+    textureDescription.dataSize = baked.pixels.size();
+    const TextureHandle texture = createTexture2D(textureDescription);
+    if (!texture.valid()) {
+        return invalidFontHandle;
+    }
+
+    Impl::FontResource resource;
+    resource.texture = texture;
+    resource.atlas = baked.atlas;
+    resource.atlas.texture = texture;
+    const std::uint64_t id = impl_->nextFontId++;
+    impl_->fonts[id] = std::move(resource);
+    return FontHandle{id};
+}
+
+FontHandle Graphics::createFontFromMsdf(const std::string& jsonPath, const std::string& pngPath) {
+    if (!impl_) {
+        return invalidFontHandle;
+    }
+    if (!initialized()) {
+        impl_->setError("Graphics is not initialized");
+        return invalidFontHandle;
+    }
+    const std::string json = graphics_internal::readFileText(jsonPath);
+    const std::vector<std::uint8_t> png = graphics_internal::readFileBytes(pngPath);
+    if (json.empty() || png.empty()) {
+        impl_->setError("MSDF atlas files could not be read");
+        return invalidFontHandle;
+    }
+    graphics_internal::BakedFontAtlas baked = graphics_internal::loadMsdfAtlas(json, png);
+    if (baked.pixels.empty() || baked.atlas.glyphs.empty()) {
+        impl_->setError("MSDF atlas loading failed");
+        return invalidFontHandle;
+    }
+
+    TextureDesc textureDescription;
+    textureDescription.width = baked.width;
+    textureDescription.height = baked.height;
+    textureDescription.format = TextureFormat::Rgba8Unorm;
+    textureDescription.pixels = baked.pixels.data();
+    textureDescription.dataSize = baked.pixels.size();
+    const TextureHandle texture = createTexture2D(textureDescription);
+    if (!texture.valid()) {
+        return invalidFontHandle;
+    }
+
+    Impl::FontResource resource;
+    resource.texture = texture;
+    resource.atlas = baked.atlas;
+    resource.atlas.texture = texture;
+    const std::uint64_t id = impl_->nextFontId++;
+    impl_->fonts[id] = std::move(resource);
+    return FontHandle{id};
+}
+
+void Graphics::destroyFont(FontHandle handle) noexcept {
+    if (!impl_ || !handle.valid()) {
+        return;
+    }
+    const auto fontIt = impl_->fonts.find(handle.value());
+    if (fontIt == impl_->fonts.end()) {
+        return;
+    }
+    destroyTexture2D(fontIt->second.texture);
+    impl_->fonts.erase(fontIt);
+}
+
+bool Graphics::fontValid(FontHandle handle) const noexcept {
+    return impl_ != nullptr && handle.valid() && impl_->fonts.count(handle.value()) != 0;
+}
+
 
 bool Graphics::render(const CameraState& camera, const std::vector<RenderItem>& items) {
     return render(camera, EnvironmentState{}, items);

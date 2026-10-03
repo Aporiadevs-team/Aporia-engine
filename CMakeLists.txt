@@ -58,6 +58,7 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp
         src/Graphics/GlobalDrawer/Hdr/HdrRenderer.cpp
         src/Graphics/GlobalDrawer/Text/TextRenderer.cpp
+        src/Graphics/GlobalDrawer/Text/FontAtlasBuilder.cpp
         src/Graphics/TextureManager/TextureManager.cpp)
 endif()
 
@@ -189,7 +190,11 @@ target_include_directories(AporiaEngine
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/extern/stb"
 )
+set_source_files_properties(src/Graphics/GlobalDrawer/Text/FontAtlasBuilder.cpp
+    PROPERTIES COMPILE_OPTIONS "/w")
 target_compile_definitions(AporiaEngine PRIVATE APORIA_BUILDING_LIBRARY)
 target_compile_definitions(AporiaEngine INTERFACE APORIA_USING_LIBRARY)
 
@@ -250,6 +255,7 @@ if (APORIA_BUILD_RENDER_TESTS)
     add_subdirectory(tests/graphics/5 aporia-render-test-5)
     add_subdirectory(tests/graphics/6 aporia-render-test-6)
     add_subdirectory(tests/graphics/7 aporia-render-test-7)
+    add_subdirectory(tests/graphics/8 aporia-render-test-8)
 endif()
 
 if(APORIA_BUILD_VISIBLE_RENDER_TESTS)
@@ -283,6 +289,19 @@ if (APORIA_BUILD_TESTS)
         aporia_stage_engine_runtime(AporiaGraphicsStress)
         add_test(NAME AporiaGraphicsStress COMMAND AporiaGraphicsStress 4096 4)
         set_tests_properties(AporiaGraphicsStress PROPERTIES TIMEOUT 180)
+
+        add_executable(AporiaTextTest tests/text/main.cpp)
+        target_link_libraries(AporiaTextTest PRIVATE Aporia::Engine)
+        set_target_properties(AporiaTextTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        aporia_stage_engine_runtime(AporiaTextTest)
+        add_test(NAME AporiaTextTest COMMAND AporiaTextTest 6000)
+        set_tests_properties(AporiaTextTest PROPERTIES TIMEOUT 300)
+
+        if(WIN32)
+            add_subdirectory(tests/text_gui aporia-text-gui-test)
+            add_test(NAME AporiaTextGuiTest COMMAND AporiaTextGuiTest 8)
+            set_tests_properties(AporiaTextGuiTest PROPERTIES TIMEOUT 120)
+        endif()
 
         if(WIN32)
             add_executable(AporiaGraphicsNative tests/graphics/native_main.cpp)

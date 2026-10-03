@@ -24,6 +24,7 @@ public:
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     std::uint32_t graphicsFamily = 0;
+    bool vsync = true;
 
     [[nodiscard]] bool valid() const noexcept {
         return instance != VK_NULL_HANDLE && device != VK_NULL_HANDLE &&

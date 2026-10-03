@@ -2,11 +2,13 @@
 
 #include "Aporia/Graphics/Graphics.hpp"
 
-#include <vulkan/vulkan.h>
 #include <cstdint>
+#include <vulkan/vulkan.h>
 
 namespace Aporia::graphics_internal {
 
+// Stateless recorder for UI rectangles: it reads a draw list passed by the
+// caller, so the engine never copies the list per frame.
 class RectRenderer {
 public:
     struct PushConstants {
@@ -28,14 +30,8 @@ public:
         VkCommandBuffer commandBuffer,
         VkPipelineLayout pipelineLayout,
         std::uint32_t width,
-        std::uint32_t height) const noexcept;
-
-    void setDrawList(const UiDrawList& drawList) { drawList_ = drawList; }
-    void clear() noexcept { drawList_ = {}; }
-    [[nodiscard]] const UiDrawList& drawList() const noexcept { return drawList_; }
-
-private:
-    UiDrawList drawList_{};
+        std::uint32_t height,
+        const UiDrawList& drawList) const noexcept;
 };
 
-}
+} // namespace Aporia::graphics_internal

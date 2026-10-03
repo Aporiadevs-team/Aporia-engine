@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -156,6 +157,25 @@ int main() {
     const Aporia::MeshHandle cube = localGraphics.createMesh(Aporia::apr::makeBoxMesh(0.7f, 0.7f, 0.7f));
     const Aporia::MeshHandle pillar = localGraphics.createMesh(Aporia::apr::makeBoxMesh(0.45f, 0.45f, 2.0f));
     const Aporia::MeshHandle sphere = localGraphics.createMesh(Aporia::apr::makeSphereMesh(0.65f, 24, 16));
+
+    Aporia::FontHandle font;
+    for (const char* candidate : {
+             "C:/Windows/Fonts/segoeui.ttf",
+             "C:/Windows/Fonts/arial.ttf",
+             "C:/Windows/Fonts/consola.ttf",
+             "C:/Windows/Fonts/calibri.ttf"}) {
+        std::ifstream probe(candidate);
+        if (!probe.good()) {
+            continue;
+        }
+        font = localGraphics.createFontFromTtf(candidate, 22.0f);
+        if (font.valid()) {
+            break;
+        }
+    }
+    if (!font.valid()) {
+        std::cerr << "Text font unavailable: " << localGraphics.lastError() << '\n';
+    }
     const float white[4] = {0.85f, 0.85f, 0.85f, 1.0f};
     const float playerColor[4] = {0.2f, 0.65f, 1.0f, 1.0f};
     const float red[4] = {1.0f, 0.18f, 0.12f, 1.0f};
@@ -214,7 +234,14 @@ int main() {
         addItem(items, sphere, sphereModel, gold);
 
         Aporia::UiDrawList ui;
+        std::string ultraLine;
+        std::string presetLine;
         if (settingsOpen) {
+            ultraLine = std::string("U Player ultra shadows: ") + (playerUltra ? "ON" : "OFF");
+            presetLine = std::string("Current preset: ") +
+                (quality == Aporia::GraphicsQuality::Low ? "Low"
+                 : quality == Aporia::GraphicsQuality::Medium ? "Medium" : "High");
+            ui.font = font;
             ui.cornerRadius = 12.0f;
             ui.blur.mode = Aporia::BlurMode::Kawase;
             ui.blur.radius = 5.0f;
@@ -222,8 +249,8 @@ int main() {
             ui.roundedRects.push_back({{24.0f, 24.0f, 370.0f, 185.0f}, {0.04f, 0.06f, 0.10f, 0.94f}});
             ui.textRuns.push_back({"GRAPHICS SETTINGS", 48.0f, 48.0f, 24.0f, {0.95f, 0.97f, 1.0f, 1.0f}});
             ui.textRuns.push_back({"1 Low    2 Medium    3 High", 48.0f, 88.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
-            ui.textRuns.push_back({std::string("U Player ultra shadows: ") + (playerUltra ? "ON" : "OFF"), 48.0f, 116.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
-            ui.textRuns.push_back({std::string("Current preset: ") + (quality == Aporia::GraphicsQuality::Low ? "Low" : quality == Aporia::GraphicsQuality::Medium ? "Medium" : "High"), 48.0f, 144.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
+            ui.textRuns.push_back({ultraLine, 48.0f, 116.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
+            ui.textRuns.push_back({presetLine, 48.0f, 144.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
             ui.textRuns.push_back({"ESC close settings", 48.0f, 174.0f, 14.0f, {0.65f, 0.70f, 0.78f, 1.0f}});
         }
         localGraphics.setUiDrawList(std::move(ui));

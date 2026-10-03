@@ -56,19 +56,20 @@ void RectRenderer::drawBlurredRect(VkCommandBuffer commandBuffer, VkPipelineLayo
 }
 
 void RectRenderer::draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout,
-                        std::uint32_t width, std::uint32_t height) const noexcept {
-    if (drawList_.roundedRects.empty() || commandBuffer == VK_NULL_HANDLE ||
+                        std::uint32_t width, std::uint32_t height,
+                        const UiDrawList& drawList) const noexcept {
+    if (drawList.roundedRects.empty() || commandBuffer == VK_NULL_HANDLE ||
         pipelineLayout == VK_NULL_HANDLE || width == 0 || height == 0) {
         return;
     }
 
-    for (const auto& item : drawList_.roundedRects) {
-        if (drawList_.blur.mode != BlurMode::None) {
+    for (const auto& item : drawList.roundedRects) {
+        if (drawList.blur.mode != BlurMode::None) {
             drawBlurredRect(commandBuffer, pipelineLayout, item.first, item.second,
-                            drawList_.cornerRadius, drawList_.blur);
-        } else if (drawList_.cornerRadius > 0.0f) {
+                            drawList.cornerRadius, drawList.blur);
+        } else if (drawList.cornerRadius > 0.0f) {
             drawRoundedRect(commandBuffer, pipelineLayout, item.first, item.second,
-                            drawList_.cornerRadius);
+                            drawList.cornerRadius);
         } else {
             drawRect(commandBuffer, pipelineLayout, item.first, item.second);
         }

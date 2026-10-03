@@ -41,7 +41,8 @@ struct QualityParameters {
     VkSurfaceFormatKHR& selectedFormat);
 [[nodiscard]] VkPresentModeKHR choosePresentMode(
     VkPhysicalDevice physicalDevice,
-    VkSurfaceKHR surface);
+    VkSurfaceKHR surface,
+    bool vsync);
 
 #if defined(_WIN32)
 [[nodiscard]] bool getWindowExtent(HWND window, VkExtent2D& extent) noexcept;

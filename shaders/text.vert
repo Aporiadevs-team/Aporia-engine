@@ -9,7 +9,7 @@ layout(set = 0, binding = 0) uniform FontData {
     vec4 outlineColor;  // rgba
     vec4 atlasData;     // xy = atlas size, z = distanceRange, w = fontSize
     ivec4 charCount;    // x = number of glyphs in batch
-    vec4 chars[256];    // 4 vec4 per glyph: posSize, uvCoords, color, rotationData
+    vec4 chars[2048];    // 4 vec4 per glyph: posSize, uvCoords, color, rotationData
 } font;
 
 layout(location = 0) out vec2 texCoord;
@@ -45,8 +45,9 @@ void main() {
         screenPos = rotatePoint(screenPos, rotationData.yz, rotationData.x);
     }
 
+    // Vulkan NDC y already points down, matching the top-left screen space
+    // used to lay glyphs out, so no y flip is needed.
     vec2 ndc = (screenPos / font.screenData.xy) * 2.0 - 1.0;
-    ndc.y = -ndc.y;
     gl_Position = vec4(ndc, 0.0, 1.0);
 
     texCoord = vec2(mix(uvCoords.x, uvCoords.z, pos.x), mix(uvCoords.y, uvCoords.w, pos.y));
