@@ -1,6 +1,6 @@
 #include "TaaRenderer.hpp"
 
-#include "../Device/SceneManager/Color/ColorTarget.hpp"
+#include "Device/SceneManager/Color/ColorTarget.hpp"
 
 #include <array>
 #include <cstring>

@@ -40,12 +40,12 @@ set(APORIA_SOURCES
 )
 
 if (APORIA_ENABLE_INPUT)
-    list(APPEND APORIA_SOURCES src/Platform/Win32/Input/InputWin32.cpp)
+    list(APPEND APORIA_SOURCES src/Device/Platform/Win32/Input/InputWin32.cpp)
     if (APORIA_INPUT_SDL3)
-        list(APPEND APORIA_SOURCES src/Platform/SDL3/Input/InputSDL3.cpp)
+        list(APPEND APORIA_SOURCES src/Device/Platform/SDL3/Input/InputSDL3.cpp)
     endif()
     if (APORIA_INPUT_GLFW)
-        list(APPEND APORIA_SOURCES src/Platform/Glfw/Input/InputGlfw.cpp)
+        list(APPEND APORIA_SOURCES src/Device/Platform/Glfw/Input/InputGlfw.cpp)
     endif()
 endif()
 
@@ -63,11 +63,11 @@ if(APORIA_ENABLE_GRAPHICS)
     list(APPEND APORIA_SOURCES
         src/Graphics/GlobalDrawer/MeshPrimitives.cpp
         src/Graphics/GlobalDrawer/Support/Support.cpp
-        src/Graphics/GlobalDrawer/Device/Device.cpp
-        src/Graphics/GlobalDrawer/Device/MemoryManager/MemoryManager.cpp
-        src/Graphics/GlobalDrawer/Device/SceneManager/Color/ColorTarget.cpp
-        src/Graphics/GlobalDrawer/Device/SceneManager/Depth/DepthTarget.cpp
-        src/Graphics/GlobalDrawer/Device/Init/RenderPass.cpp
+        src/Device/Device.cpp
+        src/Device/MemoryManager/MemoryManager.cpp
+        src/Device/SceneManager/Color/ColorTarget.cpp
+        src/Device/SceneManager/Depth/DepthTarget.cpp
+        src/Device/Init/RenderPass.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
         src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp
@@ -227,6 +227,7 @@ target_include_directories(AporiaEngine
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/extern/stb"
 )
 set_source_files_properties(src/Graphics/GlobalDrawer/Text/FontAtlasBuilder.cpp
