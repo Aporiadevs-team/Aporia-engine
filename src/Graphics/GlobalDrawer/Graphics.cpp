@@ -16,6 +16,7 @@
 #include "Support/Support.hpp"
 #include "Text/FontAtlasBuilder.hpp"
 #include "Hdr/HdrRenderer.hpp"
+#include "Hdr/TaaRenderer.hpp"
 #include "Meshes/MeshRenderer.hpp"
 #include "Rectangulars/RectRenderer.hpp"
 #include "Shadows/ShadowRenderer.hpp"
@@ -253,31 +254,9 @@ struct Graphics::Impl {
 
     // Temporal anti-aliasing: a resolve pass reprojects the previous frame with
     // the scene depth. The scene renders with a sub-pixel jitter so the history
-    // accumulates into a supersampled image.
+    // accumulates into a supersampled image. Resources live in TaaRenderer.
     VkShaderModule taaFragmentShader = VK_NULL_HANDLE;
-    VkDescriptorSetLayout taaDescriptorLayout = VK_NULL_HANDLE;
-    VkPipelineLayout taaPipelineLayout = VK_NULL_HANDLE;
-    VkPipeline taaPipeline = VK_NULL_HANDLE;
-    VkDescriptorPool taaDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet taaDescriptorSet = VK_NULL_HANDLE;
-    VkBuffer taaUniformBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory taaUniformMemory = VK_NULL_HANDLE;
-    VkImage taaResolveImage = VK_NULL_HANDLE;
-    VkDeviceMemory taaResolveMemory = VK_NULL_HANDLE;
-    VkImageView taaResolveView = VK_NULL_HANDLE;
-    VkFramebuffer taaResolveFramebuffer = VK_NULL_HANDLE;
-    VkImageView taaResolveDepthView = VK_NULL_HANDLE;
-    VkImage taaResolveDepthImage = VK_NULL_HANDLE;
-    VkDeviceMemory taaResolveDepthMemory = VK_NULL_HANDLE;
-    VkImage taaHistoryImage = VK_NULL_HANDLE;
-    VkDeviceMemory taaHistoryMemory = VK_NULL_HANDLE;
-    VkImageView taaHistoryView = VK_NULL_HANDLE;
-    VkSampler taaColorSampler = VK_NULL_HANDLE;
-    VkSampler taaDepthSampler = VK_NULL_HANDLE;
-    std::uint32_t taaWidth = 0;
-    std::uint32_t taaHeight = 0;
-    bool taaResourcesValid = false;
-    bool taaHistoryValid = false;
+    graphics_internal::TaaRenderer taa;
     float taaViewProj[16]{};
     float taaPrevViewProj[16]{};
     float taaInvViewProj[16]{};
@@ -839,330 +818,8 @@ struct Graphics::Impl {
         return result;
     }
 
-    void writeTaaUniforms() {
-        if (taaUniformMemory == VK_NULL_HANDLE) {
-            return;
-        }
-        void* mapped = nullptr;
-        if (vkMapMemory(device, taaUniformMemory, 0, 160, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
-            return;
-        }
-        struct TaaUniforms {
-            float prevViewProj[16];
-            float invViewProj[16];
-            float params[4];
-            float resolution[4];
-        } uniforms{};
-        std::memcpy(uniforms.prevViewProj, taaPrevViewProj, sizeof(uniforms.prevViewProj));
-        std::memcpy(uniforms.invViewProj, taaInvViewProj, sizeof(uniforms.invViewProj));
-        uniforms.params[0] = antiAliasingStrength;
-        uniforms.params[1] = taaHistoryValid ? 1.0f : 0.0f;
-        uniforms.params[2] = taaWidth != 0 ? 1.0f / static_cast<float>(taaWidth) : 0.0f;
-        uniforms.params[3] = taaHeight != 0 ? 1.0f / static_cast<float>(taaHeight) : 0.0f;
-        uniforms.resolution[0] = static_cast<float>(taaWidth);
-        uniforms.resolution[1] = static_cast<float>(taaHeight);
-        std::memcpy(mapped, &uniforms, sizeof(uniforms));
-        vkUnmapMemory(device, taaUniformMemory);
-    }
-
-    void destroyTaaResources() noexcept {
-        if (device != VK_NULL_HANDLE) {
-            if (taaPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device, taaPipeline, nullptr); }
-            if (taaPipelineLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, taaPipelineLayout, nullptr); }
-            if (taaDescriptorPool != VK_NULL_HANDLE) { vkDestroyDescriptorPool(device, taaDescriptorPool, nullptr); }
-            if (taaDescriptorLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, taaDescriptorLayout, nullptr); }
-            if (taaResolveFramebuffer != VK_NULL_HANDLE) { vkDestroyFramebuffer(device, taaResolveFramebuffer, nullptr); }
-            if (taaResolveDepthView != VK_NULL_HANDLE) { vkDestroyImageView(device, taaResolveDepthView, nullptr); }
-            if (taaResolveDepthImage != VK_NULL_HANDLE) { vkDestroyImage(device, taaResolveDepthImage, nullptr); }
-            if (taaResolveDepthMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaResolveDepthMemory, nullptr); }
-            if (taaResolveView != VK_NULL_HANDLE) { vkDestroyImageView(device, taaResolveView, nullptr); }
-            if (taaResolveImage != VK_NULL_HANDLE) { vkDestroyImage(device, taaResolveImage, nullptr); }
-            if (taaResolveMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaResolveMemory, nullptr); }
-            if (taaHistoryView != VK_NULL_HANDLE) { vkDestroyImageView(device, taaHistoryView, nullptr); }
-            if (taaHistoryImage != VK_NULL_HANDLE) { vkDestroyImage(device, taaHistoryImage, nullptr); }
-            if (taaHistoryMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaHistoryMemory, nullptr); }
-            if (taaColorSampler != VK_NULL_HANDLE) { vkDestroySampler(device, taaColorSampler, nullptr); }
-            if (taaDepthSampler != VK_NULL_HANDLE) { vkDestroySampler(device, taaDepthSampler, nullptr); }
-            if (taaUniformBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, taaUniformBuffer, nullptr); }
-            if (taaUniformMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaUniformMemory, nullptr); }
-        }
-        taaResolveFramebuffer = VK_NULL_HANDLE;
-        taaResolveDepthView = VK_NULL_HANDLE;
-        taaResolveDepthImage = VK_NULL_HANDLE;
-        taaResolveDepthMemory = VK_NULL_HANDLE;
-        taaResolveView = VK_NULL_HANDLE;
-        taaResolveImage = VK_NULL_HANDLE;
-        taaResolveMemory = VK_NULL_HANDLE;
-        taaHistoryView = VK_NULL_HANDLE;
-        taaHistoryImage = VK_NULL_HANDLE;
-        taaHistoryMemory = VK_NULL_HANDLE;
-        taaColorSampler = VK_NULL_HANDLE;
-        taaDepthSampler = VK_NULL_HANDLE;
-        taaDescriptorSet = VK_NULL_HANDLE;
-        taaDescriptorPool = VK_NULL_HANDLE;
-        taaDescriptorLayout = VK_NULL_HANDLE;
-        taaPipelineLayout = VK_NULL_HANDLE;
-        taaPipeline = VK_NULL_HANDLE;
-        taaUniformBuffer = VK_NULL_HANDLE;
-        taaUniformMemory = VK_NULL_HANDLE;
-        taaWidth = 0;
-        taaHeight = 0;
-        taaResourcesValid = false;
-        taaHistoryValid = false;
-    }
-
-    bool createTaaResources(std::uint32_t width, std::uint32_t height) {
-        if (taaResourcesValid && width == taaWidth && height == taaHeight) {
-            return true;
-        }
-        destroyTaaResources();
-        if (width == 0 || height == 0 || hdrRenderPass == VK_NULL_HANDLE || taaFragmentShader == VK_NULL_HANDLE) {
-            return false;
-        }
-
-        if (!createColorTarget(hdrFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, width, height, hdrRenderPass,
-                               taaResolveView, taaResolveFramebuffer, taaResolveImage, taaResolveMemory,
-                               taaResolveDepthView, taaResolveDepthImage, taaResolveDepthMemory)) {
-            setError("TAA resolve target creation failed");
-            return false;
-        }
-        VkFramebuffer ignoredFramebuffer = VK_NULL_HANDLE;
-        VkImageView ignoredDepthView = VK_NULL_HANDLE;
-        VkImage ignoredDepthImage = VK_NULL_HANDLE;
-        VkDeviceMemory ignoredDepthMemory = VK_NULL_HANDLE;
-        if (!createColorTarget(hdrFormat, VK_IMAGE_USAGE_TRANSFER_DST_BIT, width, height, VK_NULL_HANDLE,
-                               taaHistoryView, ignoredFramebuffer, taaHistoryImage, taaHistoryMemory,
-                               ignoredDepthView, ignoredDepthImage, ignoredDepthMemory)) {
-            setError("TAA history target creation failed");
-            return false;
-        }
-
-        VkSamplerCreateInfo colorSamplerInfo{};
-        colorSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        colorSamplerInfo.magFilter = VK_FILTER_LINEAR;
-        colorSamplerInfo.minFilter = VK_FILTER_LINEAR;
-        colorSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        colorSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        colorSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        colorSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        colorSamplerInfo.maxLod = 1.0f;
-        if (vkCreateSampler(device, &colorSamplerInfo, nullptr, &taaColorSampler) != VK_SUCCESS) {
-            setError("TAA color sampler creation failed");
-            return false;
-        }
-        VkSamplerCreateInfo depthSamplerInfo{};
-        depthSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        depthSamplerInfo.magFilter = VK_FILTER_NEAREST;
-        depthSamplerInfo.minFilter = VK_FILTER_NEAREST;
-        depthSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        depthSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        depthSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        depthSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        depthSamplerInfo.maxLod = 0.0f;
-        if (vkCreateSampler(device, &depthSamplerInfo, nullptr, &taaDepthSampler) != VK_SUCCESS) {
-            setError("TAA depth sampler creation failed");
-            return false;
-        }
-
-        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
-        for (std::uint32_t index = 0; index < 3; ++index) {
-            bindings[index].binding = index;
-            bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            bindings[index].descriptorCount = 1;
-            bindings[index].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        }
-        bindings[3].binding = 3;
-        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        bindings[3].descriptorCount = 1;
-        bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        VkDescriptorSetLayoutCreateInfo taaLayoutInfo{};
-        taaLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        taaLayoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
-        taaLayoutInfo.pBindings = bindings.data();
-        if (vkCreateDescriptorSetLayout(device, &taaLayoutInfo, nullptr, &taaDescriptorLayout) != VK_SUCCESS) {
-            setError("TAA descriptor layout creation failed");
-            return false;
-        }
-        VkPipelineLayoutCreateInfo taaPipelineInfo{};
-        taaPipelineInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        taaPipelineInfo.setLayoutCount = 1;
-        taaPipelineInfo.pSetLayouts = &taaDescriptorLayout;
-        if (vkCreatePipelineLayout(device, &taaPipelineInfo, nullptr, &taaPipelineLayout) != VK_SUCCESS) {
-            setError("TAA pipeline layout creation failed");
-            return false;
-        }
-
-        VkDescriptorPoolSize poolSizes[2]{};
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[0].descriptorCount = 3;
-        poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[1].descriptorCount = 1;
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.maxSets = 1;
-        poolInfo.poolSizeCount = 2;
-        poolInfo.pPoolSizes = poolSizes;
-        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &taaDescriptorPool) != VK_SUCCESS) {
-            setError("TAA descriptor pool creation failed");
-            return false;
-        }
-        VkDescriptorSetAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocateInfo.descriptorPool = taaDescriptorPool;
-        allocateInfo.descriptorSetCount = 1;
-        allocateInfo.pSetLayouts = &taaDescriptorLayout;
-        if (vkAllocateDescriptorSets(device, &allocateInfo, &taaDescriptorSet) != VK_SUCCESS) {
-            setError("TAA descriptor set allocation failed");
-            return false;
-        }
-
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = 160; // 2 mat4 + 2 vec4
-        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device, &bufferInfo, nullptr, &taaUniformBuffer) != VK_SUCCESS) {
-            setError("TAA uniform buffer creation failed");
-            return false;
-        }
-        VkMemoryRequirements requirements{};
-        vkGetBufferMemoryRequirements(device, taaUniformBuffer, &requirements);
-        std::uint32_t memoryType = 0;
-        if (!findMemoryType(memoryProperties, requirements.memoryTypeBits,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, memoryType)) {
-            setError("No host-visible memory for TAA uniforms");
-            return false;
-        }
-        VkMemoryAllocateInfo uniformAllocate{};
-        uniformAllocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        uniformAllocate.allocationSize = requirements.size;
-        uniformAllocate.memoryTypeIndex = memoryType;
-        if (vkAllocateMemory(device, &uniformAllocate, nullptr, &taaUniformMemory) != VK_SUCCESS ||
-            vkBindBufferMemory(device, taaUniformBuffer, taaUniformMemory, 0) != VK_SUCCESS) {
-            setError("TAA uniform buffer memory allocation failed");
-            return false;
-        }
-
-        VkDescriptorImageInfo currentInfo{};
-        currentInfo.sampler = hdrSampler;
-        currentInfo.imageView = hdrView;
-        currentInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkDescriptorImageInfo historyInfo{};
-        historyInfo.sampler = taaColorSampler;
-        historyInfo.imageView = taaHistoryView;
-        historyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkDescriptorImageInfo depthInfo{};
-        depthInfo.sampler = taaDepthSampler;
-        depthInfo.imageView = hdrDepthView;
-        depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkDescriptorBufferInfo uniformInfo{};
-        uniformInfo.buffer = taaUniformBuffer;
-        uniformInfo.offset = 0;
-        uniformInfo.range = 160;
-        std::array<VkWriteDescriptorSet, 4> writes{};
-        for (std::uint32_t index = 0; index < 4; ++index) {
-            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[index].dstSet = taaDescriptorSet;
-            writes[index].dstBinding = index;
-            writes[index].descriptorCount = 1;
-        }
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[0].pImageInfo = &currentInfo;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[1].pImageInfo = &historyInfo;
-        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[2].pImageInfo = &depthInfo;
-        writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[3].pBufferInfo = &uniformInfo;
-        vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
-
-        // Fullscreen resolve pipeline.
-        VkPipelineShaderStageCreateInfo stages[2]{};
-        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        stages[0].module = tonemapVertexShader;
-        stages[0].pName = "main";
-        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        stages[1].module = taaFragmentShader;
-        stages[1].pName = "main";
-        VkPipelineVertexInputStateCreateInfo emptyInput{};
-        emptyInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        VkPipelineInputAssemblyStateCreateInfo assembly{};
-        assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-        VkPipelineViewportStateCreateInfo viewportState{};
-        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        viewportState.viewportCount = 1;
-        viewportState.scissorCount = 1;
-        VkPipelineRasterizationStateCreateInfo rasterization{};
-        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterization.cullMode = VK_CULL_MODE_NONE;
-        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        rasterization.lineWidth = 1.0f;
-        VkPipelineMultisampleStateCreateInfo multisample{};
-        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        VkPipelineDepthStencilStateCreateInfo depthStencil{};
-        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        VkPipelineColorBlendAttachmentState blendAttachment{};
-        blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        VkPipelineColorBlendStateCreateInfo colorBlend{};
-        colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        colorBlend.attachmentCount = 1;
-        colorBlend.pAttachments = &blendAttachment;
-        const VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamicState{};
-        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamicState.dynamicStateCount = 2;
-        dynamicState.pDynamicStates = dynamicStates;
-        VkGraphicsPipelineCreateInfo pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipelineInfo.stageCount = 2;
-        pipelineInfo.pStages = stages;
-        pipelineInfo.pVertexInputState = &emptyInput;
-        pipelineInfo.pInputAssemblyState = &assembly;
-        pipelineInfo.pViewportState = &viewportState;
-        pipelineInfo.pRasterizationState = &rasterization;
-        pipelineInfo.pMultisampleState = &multisample;
-        pipelineInfo.pDepthStencilState = &depthStencil;
-        pipelineInfo.pColorBlendState = &colorBlend;
-        pipelineInfo.pDynamicState = &dynamicState;
-        pipelineInfo.layout = taaPipelineLayout;
-        pipelineInfo.renderPass = hdrRenderPass;
-        pipelineInfo.subpass = 0;
-        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &taaPipeline) != VK_SUCCESS) {
-            setError("TAA pipeline creation failed");
-            return false;
-        }
-
-        taaWidth = width;
-        taaHeight = height;
-        taaResourcesValid = true;
-        taaHistoryValid = false;
-
-        // Tonemap must read the resolved image while TAA is active.
-        if (tonemapDescriptorSet != VK_NULL_HANDLE) {
-            VkDescriptorImageInfo resolveInfo{};
-            resolveInfo.sampler = hdrSampler;
-            resolveInfo.imageView = taaResolveView;
-            resolveInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            VkWriteDescriptorSet write{};
-            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = tonemapDescriptorSet;
-            write.dstBinding = 0;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            write.descriptorCount = 1;
-            write.pImageInfo = &resolveInfo;
-            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-        }
-        return true;
-    }
-
     void destroyQualityTargets() noexcept {
-        destroyTaaResources();
+        taa.shutdown();
         if (device != VK_NULL_HANDLE) {
             if (hdrFramebuffer != VK_NULL_HANDLE) {
                 vkDestroyFramebuffer(device, hdrFramebuffer, nullptr);
@@ -1834,8 +1491,37 @@ struct Graphics::Impl {
         }
 
         if (hdrEnabled && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA) {
-            if (!createTaaResources(hdrWidth, hdrHeight)) {
+            graphics_internal::TaaRenderer::Context taaContext;
+            taaContext.device = device;
+            taaContext.memoryProperties = memoryProperties;
+            taaContext.commandBuffer = commandBuffer;
+            taaContext.queue = queue;
+            taaContext.renderPass = hdrRenderPass;
+            taaContext.hdrFormat = hdrFormat;
+            taaContext.depthFormat = depthFormat;
+            taaContext.vertexShader = tonemapVertexShader;
+            taaContext.fragmentShader = taaFragmentShader;
+            taaContext.colorView = hdrView;
+            taaContext.depthView = hdrDepthView;
+            taaContext.colorSampler = hdrSampler;
+            if (!taa.initialize(taaContext, hdrWidth, hdrHeight)) {
+                setError("TAA initialization failed");
                 return false;
+            }
+            // Tonemap samples the resolved image while TAA is active.
+            if (tonemapDescriptorSet != VK_NULL_HANDLE) {
+                VkDescriptorImageInfo resolveInfo{};
+                resolveInfo.sampler = hdrSampler;
+                resolveInfo.imageView = taa.resolveView();
+                resolveInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = tonemapDescriptorSet;
+                write.dstBinding = 0;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                write.descriptorCount = 1;
+                write.pImageInfo = &resolveInfo;
+                vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
             }
         }
 
@@ -2518,136 +2204,8 @@ struct Graphics::Impl {
             vkCmdEndRenderPass(commandBuffer);
         }
 
-        if (useHdr && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA &&
-            taaResourcesValid && taaResolveFramebuffer != VK_NULL_HANDLE && taaPipeline != VK_NULL_HANDLE) {
-            writeTaaUniforms();
-
-            const VkImageLayout historyOldLayout = taaHistoryValid
-                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
-            std::array<VkImageMemoryBarrier, 2> toShaderRead{};
-            VkImageMemoryBarrier& depthBarrier = toShaderRead[0];
-            depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            depthBarrier.image = hdrDepthImage;
-            depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-            depthBarrier.subresourceRange.levelCount = 1;
-            depthBarrier.subresourceRange.layerCount = 1;
-            depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            VkImageMemoryBarrier& historyBarrier = toShaderRead[1];
-            historyBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            historyBarrier.oldLayout = historyOldLayout;
-            historyBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            historyBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            historyBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            historyBarrier.image = taaHistoryImage;
-            historyBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            historyBarrier.subresourceRange.levelCount = 1;
-            historyBarrier.subresourceRange.layerCount = 1;
-            historyBarrier.srcAccessMask = taaHistoryValid ? VK_ACCESS_SHADER_READ_BIT : 0;
-            historyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(commandBuffer,
-                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
-                static_cast<std::uint32_t>(toShaderRead.size()), toShaderRead.data());
-
-            std::array<VkClearValue, 2> taaClear{};
-            taaClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-            taaClear[1].depthStencil = {1.0f, 0};
-            VkRenderPassBeginInfo taaBegin{};
-            taaBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            taaBegin.renderPass = hdrRenderPass;
-            taaBegin.framebuffer = taaResolveFramebuffer;
-            taaBegin.renderArea.extent = {taaWidth, taaHeight};
-            taaBegin.clearValueCount = static_cast<std::uint32_t>(taaClear.size());
-            taaBegin.pClearValues = taaClear.data();
-            vkCmdBeginRenderPass(commandBuffer, &taaBegin, VK_SUBPASS_CONTENTS_INLINE);
-            VkViewport taaViewport{};
-            taaViewport.width = static_cast<float>(taaWidth);
-            taaViewport.height = static_cast<float>(taaHeight);
-            taaViewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &taaViewport);
-            VkRect2D taaScissor{};
-            taaScissor.extent = {taaWidth, taaHeight};
-            vkCmdSetScissor(commandBuffer, 0, 1, &taaScissor);
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, taaPipeline);
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    taaPipelineLayout, 0, 1, &taaDescriptorSet, 0, nullptr);
-            vkCmdDraw(commandBuffer, 4, 1, 0, 0);
-            vkCmdEndRenderPass(commandBuffer);
-
-            std::array<VkImageMemoryBarrier, 2> toTransfer{};
-            VkImageMemoryBarrier& resolveSource = toTransfer[0];
-            resolveSource.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            resolveSource.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            resolveSource.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            resolveSource.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            resolveSource.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            resolveSource.image = taaResolveImage;
-            resolveSource.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            resolveSource.subresourceRange.levelCount = 1;
-            resolveSource.subresourceRange.layerCount = 1;
-            resolveSource.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            resolveSource.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            VkImageMemoryBarrier& historyDestination = toTransfer[1];
-            historyDestination.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            historyDestination.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            historyDestination.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            historyDestination.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            historyDestination.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            historyDestination.image = taaHistoryImage;
-            historyDestination.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            historyDestination.subresourceRange.levelCount = 1;
-            historyDestination.subresourceRange.layerCount = 1;
-            historyDestination.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            historyDestination.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
-                static_cast<std::uint32_t>(toTransfer.size()), toTransfer.data());
-            VkImageCopy copyRegion{};
-            copyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            copyRegion.srcSubresource.mipLevel = 0;
-            copyRegion.srcSubresource.baseArrayLayer = 0;
-            copyRegion.srcSubresource.layerCount = 1;
-            copyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            copyRegion.dstSubresource.mipLevel = 0;
-            copyRegion.dstSubresource.baseArrayLayer = 0;
-            copyRegion.dstSubresource.layerCount = 1;
-            copyRegion.extent = {taaWidth, taaHeight, 1};
-            vkCmdCopyImage(commandBuffer, taaResolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           taaHistoryImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
-            std::array<VkImageMemoryBarrier, 2> toRead{};
-            VkImageMemoryBarrier& resolveBack = toRead[0];
-            resolveBack.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            resolveBack.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            resolveBack.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            resolveBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            resolveBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            resolveBack.image = taaResolveImage;
-            resolveBack.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            resolveBack.subresourceRange.levelCount = 1;
-            resolveBack.subresourceRange.layerCount = 1;
-            resolveBack.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            resolveBack.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            VkImageMemoryBarrier& historyBack = toRead[1];
-            historyBack.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            historyBack.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            historyBack.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            historyBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            historyBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            historyBack.image = taaHistoryImage;
-            historyBack.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            historyBack.subresourceRange.levelCount = 1;
-            historyBack.subresourceRange.layerCount = 1;
-            historyBack.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            historyBack.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
-                static_cast<std::uint32_t>(toRead.size()), toRead.data());
-            taaHistoryValid = true;
+        if (useHdr && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA && taa.valid()) {
+            taa.record(commandBuffer, hdrDepthImage, taaPrevViewProj, taaInvViewProj, antiAliasingStrength);
         }
 
         if (useHdr) {
@@ -2762,7 +2320,7 @@ struct Graphics::Impl {
                 vkDestroyShaderModule(device, tonemapFragmentShader, nullptr);
                 tonemapFragmentShader = VK_NULL_HANDLE;
             }
-            destroyTaaResources();
+            taa.shutdown();
             if (taaFragmentShader != VK_NULL_HANDLE) {
                 vkDestroyShaderModule(device, taaFragmentShader, nullptr);
                 taaFragmentShader = VK_NULL_HANDLE;

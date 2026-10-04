@@ -72,6 +72,7 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
         src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp
         src/Graphics/GlobalDrawer/Hdr/HdrRenderer.cpp
+        src/Graphics/GlobalDrawer/Hdr/TaaRenderer.cpp
         src/Graphics/GlobalDrawer/Text/TextRenderer.cpp
         src/Graphics/GlobalDrawer/Text/FontAtlasBuilder.cpp
         src/Graphics/TextureManager/TextureManager.cpp)
