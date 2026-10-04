@@ -12,6 +12,7 @@
 #include "Device/MemoryManager/MemoryManager.hpp"
 #include "Device/SceneManager/Color/ColorTarget.hpp"
 #include "Device/SceneManager/Depth/DepthTarget.hpp"
+#include "Device/SceneManager/HeadlessTarget/HeadlessTarget.hpp"
 #include "Device/SceneManager/SceneBindings/SceneBindings.hpp"
 #include "Device/Init/RenderPass.hpp"
 #include "Support/Support.hpp"
@@ -1448,94 +1449,17 @@ struct Graphics::Impl {
 
 
     void destroyHeadlessTarget() noexcept {
-        if (device == VK_NULL_HANDLE) {
-            return;
-        }
-        if (framebuffer != VK_NULL_HANDLE) {
-            vkDestroyFramebuffer(device, framebuffer, nullptr);
-            framebuffer = VK_NULL_HANDLE;
-        }
-        if (colorView != VK_NULL_HANDLE) {
-            vkDestroyImageView(device, colorView, nullptr);
-            colorView = VK_NULL_HANDLE;
-        }
-        if (colorImage != VK_NULL_HANDLE) {
-            vkDestroyImage(device, colorImage, nullptr);
-            colorImage = VK_NULL_HANDLE;
-        }
-        if (colorMemory != VK_NULL_HANDLE) {
-            vkFreeMemory(device, colorMemory, nullptr);
-            colorMemory = VK_NULL_HANDLE;
-        }
+        graphics_internal::HeadlessTarget::destroy(device, framebuffer, colorView, colorImage, colorMemory);
     }
 
     bool createHeadlessTarget() {
         if (!ensureDepthForExtent(renderWidth, renderHeight)) {
             return false;
         }
-
-        VkImageCreateInfo imageInfo{};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.format = colorFormat;
-        imageInfo.extent = {renderWidth, renderHeight, 1};
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device, &imageInfo, nullptr, &colorImage) != VK_SUCCESS) {
-            setError("vkCreateImage failed");
-            return false;
-        }
-
-        VkMemoryRequirements imageRequirements{};
-        vkGetImageMemoryRequirements(device, colorImage, &imageRequirements);
-        std::uint32_t memoryType = 0;
-        if (!findMemoryType(memoryProperties, imageRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memoryType)) {
-            setError("No device-local memory type for Vulkan color image");
-            return false;
-        }
-
-        VkMemoryAllocateInfo memoryInfo{};
-        memoryInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        memoryInfo.allocationSize = imageRequirements.size;
-        memoryInfo.memoryTypeIndex = memoryType;
-        if (vkAllocateMemory(device, &memoryInfo, nullptr, &colorMemory) != VK_SUCCESS) {
-            setError("vkAllocateMemory failed");
-            return false;
-        }
-        if (vkBindImageMemory(device, colorImage, colorMemory, 0) != VK_SUCCESS) {
-            setError("vkBindImageMemory failed");
-            return false;
-        }
-
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = colorImage;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = colorFormat;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &viewInfo, nullptr, &colorView) != VK_SUCCESS) {
-            setError("vkCreateImageView failed");
-            return false;
-        }
-
-        std::array<VkImageView, 2> attachments{colorView, depthView};
-        VkFramebufferCreateInfo framebufferInfo{};
-        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = renderPass;
-        framebufferInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-        framebufferInfo.pAttachments = attachments.data();
-        framebufferInfo.width = renderWidth;
-        framebufferInfo.height = renderHeight;
-        framebufferInfo.layers = 1;
-        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffer) != VK_SUCCESS) {
-            setError("vkCreateFramebuffer failed");
+        if (!graphics_internal::HeadlessTarget::create(
+                device, memoryProperties, colorFormat, {renderWidth, renderHeight}, renderPass, depthView,
+                colorImage, colorMemory, colorView, framebuffer)) {
+            setError("Headless target creation failed");
             return false;
         }
         return true;
