@@ -12,6 +12,7 @@
 #include "Device/MemoryManager/MemoryManager.hpp"
 #include "Device/SceneManager/Color/ColorTarget.hpp"
 #include "Device/SceneManager/Depth/DepthTarget.hpp"
+#include "Device/SceneManager/SceneBindings/SceneBindings.hpp"
 #include "Device/Init/RenderPass.hpp"
 #include "Support/Support.hpp"
 #include "Text/FontAtlasBuilder.hpp"
@@ -223,12 +224,7 @@ struct Graphics::Impl {
 
     // Quality pass resources. One scene uniform buffer + descriptor set per
     // frame-in-flight slot; shadow/reflection maps are stable shared images.
-    static constexpr std::uint32_t sceneUniformCount = 2;
-    VkBuffer sceneUniformBuffers[sceneUniformCount] = {};
-    VkDeviceMemory sceneUniformMemory[sceneUniformCount] = {};
-    VkDescriptorPool sceneDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSetLayout sceneDescriptorLayout = VK_NULL_HANDLE;
-    VkDescriptorSet sceneDescriptorSets[sceneUniformCount] = {};
+    graphics_internal::SceneBindings scene;
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
     VkShaderModule shadowVertexShader = VK_NULL_HANDLE;
@@ -873,21 +869,7 @@ struct Graphics::Impl {
             if (reflectSampler != VK_NULL_HANDLE) {
                 vkDestroySampler(device, reflectSampler, nullptr);
             }
-            for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
-                if (sceneUniformBuffers[slot] != VK_NULL_HANDLE) {
-                    vkDestroyBuffer(device, sceneUniformBuffers[slot], nullptr);
-                    sceneUniformBuffers[slot] = VK_NULL_HANDLE;
-                }
-                if (sceneUniformMemory[slot] != VK_NULL_HANDLE) {
-                    vkFreeMemory(device, sceneUniformMemory[slot], nullptr);
-                    sceneUniformMemory[slot] = VK_NULL_HANDLE;
-                }
-            }
-            if (sceneDescriptorPool != VK_NULL_HANDLE) {
-                // Pool is rebuilt each time; the layout outlives it because
-                // mesh/shadow pipeline layouts reference it.
-                vkDestroyDescriptorPool(device, sceneDescriptorPool, nullptr);
-            }
+            scene.releaseResources(device);
             if (tonemapDescriptorPool != VK_NULL_HANDLE) {
                 // Pool is owned by initialize/destroy; rebuild only reclaims
                 // the tonemap descriptor set allocated from it.
@@ -918,10 +900,6 @@ struct Graphics::Impl {
         reflectRenderPass = VK_NULL_HANDLE;
         // shadowMapSize is preset configuration, not a GPU target; it must
         // survive rebuilds so createShadowResources() sees the right size.
-        sceneDescriptorPool = VK_NULL_HANDLE;
-        for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
-            sceneDescriptorSets[slot] = VK_NULL_HANDLE;
-        }
         tonemapDescriptorSet = VK_NULL_HANDLE;
     }
 
@@ -1005,175 +983,6 @@ struct Graphics::Impl {
     }
 
 
-    bool createSceneDescriptorLayout() {
-        // Matches the shader declaration in mesh.frag/mesh.vert:
-        // 0 = albedo sampler, 1 = shadow map, 2 = reflection map,
-        // 3 = SceneUniforms UBO.
-        VkDescriptorSetLayoutBinding bindings[4]{};
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[0].descriptorCount = 1;
-        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[1].binding = 1;
-        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[2].binding = 2;
-        bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[2].descriptorCount = 1;
-        bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[3].binding = 3;
-        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        bindings[3].descriptorCount = 1;
-        bindings[3].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        VkDescriptorSetLayoutCreateInfo layoutInfo{};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 4;
-        layoutInfo.pBindings = bindings;
-        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &sceneDescriptorLayout) != VK_SUCCESS) {
-            setError("vkCreateDescriptorSetLayout(scene) failed");
-            return false;
-        }
-        return true;
-    }
-
-    bool createSceneUniforms() {
-        if (sceneDescriptorLayout == VK_NULL_HANDLE) {
-            if (!createSceneDescriptorLayout()) {
-                return false;
-            }
-        }
-        VkDescriptorPoolSize poolSizes[2]{};
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[0].descriptorCount = sceneUniformCount * 2;
-        poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[1].descriptorCount = sceneUniformCount * 2;
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.maxSets = sceneUniformCount;
-        poolInfo.poolSizeCount = 2;
-        poolInfo.pPoolSizes = poolSizes;
-        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &sceneDescriptorPool) != VK_SUCCESS) {
-            setError("vkCreateDescriptorPool(scene) failed");
-            return false;
-        }
-
-        const VkDeviceSize uniformSize = sizeof(SceneUniforms);
-        for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
-            VkBufferCreateInfo bufferInfo{};
-            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bufferInfo.size = uniformSize;
-            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            if (vkCreateBuffer(device, &bufferInfo, nullptr, &sceneUniformBuffers[slot]) != VK_SUCCESS) {
-                setError("vkCreateBuffer(scene uniforms) failed");
-                return false;
-            }
-            VkMemoryRequirements requirements{};
-            vkGetBufferMemoryRequirements(device, sceneUniformBuffers[slot], &requirements);
-            std::uint32_t memoryType = 0;
-            if (!findMemoryType(
-                    memoryProperties,
-                    requirements.memoryTypeBits,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    memoryType)) {
-                setError("No host-visible memory for scene uniforms");
-                return false;
-            }
-            VkMemoryAllocateInfo allocateInfo{};
-            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            allocateInfo.allocationSize = requirements.size;
-            allocateInfo.memoryTypeIndex = memoryType;
-            if (vkAllocateMemory(device, &allocateInfo, nullptr, &sceneUniformMemory[slot]) != VK_SUCCESS) {
-                setError("vkAllocateMemory(scene uniforms) failed");
-                return false;
-            }
-            if (vkBindBufferMemory(device, sceneUniformBuffers[slot], sceneUniformMemory[slot], 0) != VK_SUCCESS) {
-                setError("vkBindBufferMemory(scene uniforms) failed");
-                return false;
-            }
-
-            VkDescriptorSetAllocateInfo allocateSetInfo{};
-            allocateSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            allocateSetInfo.descriptorPool = sceneDescriptorPool;
-            allocateSetInfo.descriptorSetCount = 1;
-            allocateSetInfo.pSetLayouts = &sceneDescriptorLayout;
-            if (vkAllocateDescriptorSets(device, &allocateSetInfo, &sceneDescriptorSets[slot]) != VK_SUCCESS) {
-                setError("vkAllocateDescriptorSets(scene) failed");
-                return false;
-            }
-
-            VkDescriptorBufferInfo bufferDescriptor{};
-            bufferDescriptor.buffer = sceneUniformBuffers[slot];
-            bufferDescriptor.offset = 0;
-            bufferDescriptor.range = uniformSize;
-
-            const auto defaultIt = textures.find(defaultTexture.value());
-            const auto textureIt = textures.find(boundTexture.value());
-            const auto& albedoResource = textureIt != textures.end() ? textureIt->second : defaultIt->second;
-
-            VkDescriptorImageInfo albedoDescriptor{};
-            albedoDescriptor.sampler = albedoResource.sampler;
-            albedoDescriptor.imageView = albedoResource.view;
-            albedoDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            VkDescriptorImageInfo shadowDescriptor{};
-            shadowDescriptor.sampler = shadow.sampler;
-            shadowDescriptor.imageView = shadow.view;
-            shadowDescriptor.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            std::array<VkWriteDescriptorSet, 4> writes{};
-            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[0].dstSet = sceneDescriptorSets[slot];
-            writes[0].dstBinding = 0;
-            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[0].descriptorCount = 1;
-            writes[0].pImageInfo = &albedoDescriptor;
-            writes[1] = writes[0];
-            writes[1].dstBinding = 1;
-            writes[1].pImageInfo = &shadowDescriptor;
-            writes[2] = writes[0];
-            writes[2].dstBinding = 2;
-            // Reflection map descriptor is filled in after the reflect target
-            // exists (see rebuildQualityTargets); a null view is invalid, so
-            // reuse the albedo texture until then.
-            writes[2].pImageInfo = &albedoDescriptor;
-            writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[3].dstSet = sceneDescriptorSets[slot];
-            writes[3].dstBinding = 3;
-            writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[3].descriptorCount = 1;
-            writes[3].pBufferInfo = &bufferDescriptor;
-            vkUpdateDescriptorSets(device, 4, writes.data(), 0, nullptr);
-        }
-        return true;
-    }
-
-    void refreshSceneTextureBinding() {
-        if (sceneDescriptorPool == VK_NULL_HANDLE) {
-            return;
-        }
-        const auto textureIt = textures.find(boundTexture.value());
-        if (textureIt == textures.end() || textureIt->second.view == VK_NULL_HANDLE) {
-            return;
-        }
-        for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
-            if (sceneDescriptorSets[slot] == VK_NULL_HANDLE) {
-                continue;
-            }
-            VkDescriptorImageInfo albedoDescriptor{};
-            albedoDescriptor.sampler = textureIt->second.sampler;
-            albedoDescriptor.imageView = textureIt->second.view;
-            albedoDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            VkWriteDescriptorSet write{};
-            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = sceneDescriptorSets[slot];
-            write.dstBinding = 0;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            write.descriptorCount = 1;
-            write.pImageInfo = &albedoDescriptor;
-            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-        }
-    }
 
     bool uploadTextureData(
         TextureResource& texture,
@@ -1368,7 +1177,7 @@ struct Graphics::Impl {
         write.pImageInfo = &imageInfo;
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
         boundTexture = handle;
-        refreshSceneTextureBinding();
+        scene.bindAlbedo(textureIt->second.view, textureIt->second.sampler);
         return true;
     }
 
@@ -1381,13 +1190,6 @@ struct Graphics::Impl {
 
 
     void writeSceneUniforms(std::uint32_t slot, const float sunMatrix[16]) {
-        if (sceneUniformMemory[slot] == VK_NULL_HANDLE) {
-            return;
-        }
-        void* mapped = nullptr;
-        if (vkMapMemory(device, sceneUniformMemory[slot], 0, sizeof(SceneUniforms), 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
-            return;
-        }
         SceneUniforms uniforms{};
         std::memcpy(uniforms.sunViewProj, sunMatrix, sizeof(uniforms.sunViewProj));
         uniforms.sunDirection[0] = environment.sunDirection[0];
@@ -1407,8 +1209,7 @@ struct Graphics::Impl {
         uniforms.shadowParams[1] = static_cast<float>(shadowConfig.blockerSamples);
         uniforms.shadowParams[2] = static_cast<float>(shadowConfig.filterSamples);
         uniforms.shadowParams[3] = shadowConfig.contactShadows ? shadowConfig.contactDistance : 0.0f;
-        std::memcpy(mapped, &uniforms, sizeof(uniforms));
-        vkUnmapMemory(device, sceneUniformMemory[slot]);
+        scene.writeUniforms(slot, &uniforms, sizeof(uniforms));
     }
 
     // (Re)creates HDR/shadow/reflection targets for the current preset and
@@ -1555,28 +1356,16 @@ struct Graphics::Impl {
         if (!createShadowResources()) {
             return false;
         }
-        if (!createSceneUniforms()) {
+        const auto defaultIt = textures.find(defaultTexture.value());
+        const auto textureIt = textures.find(boundTexture.value());
+        const auto& albedoResource = textureIt != textures.end() ? textureIt->second : defaultIt->second;
+        if (!scene.allocate(device, memoryProperties, sizeof(SceneUniforms),
+                            albedoResource.view, albedoResource.sampler,
+                            shadow.view, shadow.sampler)) {
             return false;
         }
-        refreshSceneTextureBinding();
         if (reflectionsEnabled && reflectView != VK_NULL_HANDLE) {
-            for (std::uint32_t slot = 0; slot < sceneUniformCount; ++slot) {
-                if (sceneDescriptorSets[slot] == VK_NULL_HANDLE) {
-                    continue;
-                }
-                VkDescriptorImageInfo reflectDescriptor{};
-                reflectDescriptor.sampler = reflectSampler;
-                reflectDescriptor.imageView = reflectView;
-                reflectDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                VkWriteDescriptorSet write{};
-                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = sceneDescriptorSets[slot];
-                write.dstBinding = 2;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.descriptorCount = 1;
-                write.pImageInfo = &reflectDescriptor;
-                vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-            }
+            scene.bindReflection(reflectView, reflectSampler);
         }
         return true;
     }
@@ -1956,7 +1745,7 @@ struct Graphics::Impl {
         context.mapSize = shadowMapSize;
         context.pipeline = shadowPipeline;
         context.pipelineLayout = shadowPipelineLayout;
-        context.descriptorSet = sceneDescriptorSets[0];
+        context.descriptorSet = scene.set(0);
         graphics_internal::ShadowRenderer::renderShadowMap(context, sunMatrix, pendingItems, meshes);
     }
 
@@ -2096,7 +1885,7 @@ struct Graphics::Impl {
             return false;
         }
 
-        const std::uint32_t uniformSlot = currentFrameSlot % sceneUniformCount;
+        const std::uint32_t uniformSlot = currentFrameSlot % graphics_internal::SceneBindings::kSlots;
         float sunMatrix[16];
         buildSunMatrix(sunMatrix);
         writeSceneUniforms(uniformSlot, sunMatrix);
@@ -2135,7 +1924,7 @@ struct Graphics::Impl {
             Impl::multiplyMat4(pendingProjection, mirroredView.m[0], reflectViewProj);
             graphics_internal::MeshRenderer::renderMeshes(
                 commandBuffer, meshPipeline, meshPipelineLayout,
-                sceneDescriptorSets[uniformSlot], reflectViewProj,
+                scene.set(uniformSlot), reflectViewProj,
                 pendingItems, meshes);
             vkCmdEndRenderPass(commandBuffer);
         }
@@ -2198,7 +1987,7 @@ struct Graphics::Impl {
             if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
                 graphics_internal::MeshRenderer::renderMeshes(
                     commandBuffer, meshPipeline, meshPipelineLayout,
-                    sceneDescriptorSets[uniformSlot], pendingViewProj,
+                    scene.set(uniformSlot), pendingViewProj,
                     pendingItems, meshes, mainMeshPipeline);
             }
             vkCmdEndRenderPass(commandBuffer);
@@ -2292,10 +2081,7 @@ struct Graphics::Impl {
                 vkDestroyShaderModule(device, shadowFragmentShader, nullptr);
                 shadowFragmentShader = VK_NULL_HANDLE;
             }
-            if (sceneDescriptorLayout != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(device, sceneDescriptorLayout, nullptr);
-                sceneDescriptorLayout = VK_NULL_HANDLE;
-            }
+            scene.destroyLayout(device);
             if (tonemapPipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device, tonemapPipeline, nullptr);
                 tonemapPipeline = VK_NULL_HANDLE;
@@ -2656,10 +2442,12 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         return false;
     }
     // Scene layout must exist before the mesh/shadow pipelines referencing it.
-    if (!impl_->createSceneDescriptorLayout()) {
+    if (!impl_->scene.createLayout(impl_->device)) {
+        impl_->setError("vkCreateDescriptorSetLayout(scene) failed");
         shutdown();
         return false;
     }
+    const VkDescriptorSetLayout sceneLayout = impl_->scene.layout();
 
     const std::string shaderDirectory = APORIA_VULKAN_SHADER_DIR;
     bool spirvLoaded = false;
@@ -2829,7 +2617,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     VkPipelineLayoutCreateInfo meshLayoutInfo{};
     meshLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     meshLayoutInfo.setLayoutCount = 1;
-    meshLayoutInfo.pSetLayouts = &impl_->sceneDescriptorLayout;
+    meshLayoutInfo.pSetLayouts = &sceneLayout;
     meshLayoutInfo.pushConstantRangeCount = 1;
     meshLayoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(impl_->device, &meshLayoutInfo, nullptr, &impl_->meshPipelineLayout) != VK_SUCCESS) {
@@ -2983,7 +2771,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     VkPipelineLayoutCreateInfo shadowLayoutInfo{};
     shadowLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     shadowLayoutInfo.setLayoutCount = 1;
-    shadowLayoutInfo.pSetLayouts = &impl_->sceneDescriptorLayout;
+    shadowLayoutInfo.pSetLayouts = &sceneLayout;
     shadowLayoutInfo.pushConstantRangeCount = 1;
     shadowLayoutInfo.pPushConstantRanges = &shadowPushRange;
     if (vkCreatePipelineLayout(impl_->device, &shadowLayoutInfo, nullptr, &impl_->shadowPipelineLayout) != VK_SUCCESS) {
@@ -3670,7 +3458,10 @@ void Graphics::destroyTexture2D(TextureHandle handle) noexcept {
     }
     graphics_internal::TextureManager::destroyResource(impl_->device, textureIt->second);
     impl_->textures.erase(textureIt);
-    impl_->refreshSceneTextureBinding();
+    const auto boundIt = impl_->textures.find(impl_->boundTexture.value());
+    if (boundIt != impl_->textures.end()) {
+        impl_->scene.bindAlbedo(boundIt->second.view, boundIt->second.sampler);
+    }
 }
 
 MeshHandle Graphics::createMesh(const MeshData& data) {

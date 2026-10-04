@@ -67,6 +67,7 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Device/MemoryManager/MemoryManager.cpp
         src/Device/SceneManager/Color/ColorTarget.cpp
         src/Device/SceneManager/Depth/DepthTarget.cpp
+        src/Device/SceneManager/SceneBindings/SceneBindings.cpp
         src/Device/Init/RenderPass.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
