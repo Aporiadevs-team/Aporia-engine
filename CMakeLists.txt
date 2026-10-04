@@ -64,6 +64,10 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Graphics/GlobalDrawer/MeshPrimitives.cpp
         src/Graphics/GlobalDrawer/Support/Support.cpp
         src/Graphics/GlobalDrawer/Device/Device.cpp
+        src/Graphics/GlobalDrawer/Device/MemoryManager/MemoryManager.cpp
+        src/Graphics/GlobalDrawer/Device/SceneManager/Color/ColorTarget.cpp
+        src/Graphics/GlobalDrawer/Device/SceneManager/Depth/DepthTarget.cpp
+        src/Graphics/GlobalDrawer/Device/Init/RenderPass.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
         src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp
@@ -86,6 +90,8 @@ if(APORIA_ENABLE_GRAPHICS)
     set(APORIA_VULKAN_SHADOW_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/shadow.frag.spv")
     set(APORIA_VULKAN_TONEMAP_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/tonemap.vert.spv")
     set(APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/tonemap.frag.spv")
+    set(APORIA_VULKAN_TAA_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/taa.frag.spv")
+    set(APORIA_VULKAN_UI_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/ui.frag.spv")
     set(APORIA_VULKAN_TEXT_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/text.vert.spv")
     set(APORIA_VULKAN_TEXT_MSDF_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/text_msdf.frag.spv")
     set(APORIA_VULKAN_TEXT_TTF_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/text_ttf.frag.spv")
@@ -155,6 +161,22 @@ if(APORIA_ENABLE_GRAPHICS)
         VERBATIM
     )
     add_custom_command(
+        OUTPUT "${APORIA_VULKAN_TAA_FRAGMENT_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa.frag"
+            -o "${APORIA_VULKAN_TAA_FRAGMENT_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/taa.frag"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_UI_FRAGMENT_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ui.frag"
+            -o "${APORIA_VULKAN_UI_FRAGMENT_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ui.frag"
+        VERBATIM
+    )
+    add_custom_command(
         OUTPUT "${APORIA_VULKAN_TEXT_VERTEX_SHADER}"
         COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
             -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert"
@@ -187,6 +209,8 @@ if(APORIA_ENABLE_GRAPHICS)
         "${APORIA_VULKAN_SHADOW_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_TONEMAP_VERTEX_SHADER}"
         "${APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER}"
+        "${APORIA_VULKAN_TAA_FRAGMENT_SHADER}"
+        "${APORIA_VULKAN_UI_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_TEXT_VERTEX_SHADER}"
         "${APORIA_VULKAN_TEXT_MSDF_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_TEXT_TTF_FRAGMENT_SHADER}"
@@ -274,6 +298,7 @@ if (APORIA_BUILD_RENDER_TESTS)
     add_subdirectory(tests/graphics/7 aporia-render-test-7)
     add_subdirectory(tests/graphics/8 aporia-render-test-8)
     add_subdirectory(tests/graphics/9 aporia-render-test-9)
+    add_subdirectory(tests/graphics/10 aporia-render-test-10)
 endif()
 
 if(APORIA_BUILD_VISIBLE_RENDER_TESTS)

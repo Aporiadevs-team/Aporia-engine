@@ -17,9 +17,14 @@ SDL_Scancode scancodeFor(KeyCode key) noexcept {
     case KeyCode::U: return SDL_SCANCODE_U;
     case KeyCode::X: return SDL_SCANCODE_X;
     case KeyCode::M: return SDL_SCANCODE_M;
+    case KeyCode::T: return SDL_SCANCODE_T;
+    case KeyCode::N: return SDL_SCANCODE_N;
+    case KeyCode::P: return SDL_SCANCODE_P;
     case KeyCode::Digit1: return SDL_SCANCODE_1;
     case KeyCode::Digit2: return SDL_SCANCODE_2;
     case KeyCode::Digit3: return SDL_SCANCODE_3;
+    case KeyCode::Digit4: return SDL_SCANCODE_4;
+    case KeyCode::Digit5: return SDL_SCANCODE_5;
     case KeyCode::Space: return SDL_SCANCODE_SPACE;
     case KeyCode::Shift: return SDL_SCANCODE_LSHIFT;
     case KeyCode::Control: return SDL_SCANCODE_LCTRL;

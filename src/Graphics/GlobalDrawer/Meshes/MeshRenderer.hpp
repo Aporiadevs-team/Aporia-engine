@@ -37,22 +37,6 @@ public:
 
     static void destroyResource(VkDevice device, Resource& resource) noexcept;
 
-    struct UploadContext {
-        VkDevice device = VK_NULL_HANDLE;
-        VkPhysicalDeviceMemoryProperties memoryProperties{};
-        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-        VkQueue queue = VK_NULL_HANDLE;
-    };
-
-    // Uploads data through a staging buffer into a device-local vertex or
-    // index buffer and leaves it ready for VERTEX_INPUT.
-    static bool uploadBuffer(
-        const UploadContext& context,
-        VkDeviceSize size,
-        const void* data,
-        VkBufferUsageFlags usage,
-        VkBuffer& buffer,
-        VkDeviceMemory& memory) noexcept;
     struct Stats {
         std::uint64_t meshCount = 0;
         std::uint64_t vertexCount = 0;

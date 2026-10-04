@@ -58,6 +58,15 @@ public:
         std::uint32_t bytesPerPixel,
         std::uint32_t scalePercent,
         Resource& texture) noexcept;
+
+    // Convenience factory for a 1x1 solid-color texture (defaults, fallbacks).
+    static bool createSolid(
+        const CreateContext& context,
+        std::uint8_t r,
+        std::uint8_t g,
+        std::uint8_t b,
+        std::uint8_t a,
+        Resource& texture) noexcept;
     struct Entry {
         TextureHandle handle{};
         std::uint32_t width = 0;

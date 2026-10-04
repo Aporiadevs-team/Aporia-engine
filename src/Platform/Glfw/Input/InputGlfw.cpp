@@ -23,9 +23,14 @@ int glfwKeyFor(KeyCode key) noexcept {
     case KeyCode::U: return GLFW_KEY_U;
     case KeyCode::X: return GLFW_KEY_X;
     case KeyCode::M: return GLFW_KEY_M;
+    case KeyCode::T: return GLFW_KEY_T;
+    case KeyCode::N: return GLFW_KEY_N;
+    case KeyCode::P: return GLFW_KEY_P;
     case KeyCode::Digit1: return GLFW_KEY_1;
     case KeyCode::Digit2: return GLFW_KEY_2;
     case KeyCode::Digit3: return GLFW_KEY_3;
+    case KeyCode::Digit4: return GLFW_KEY_4;
+    case KeyCode::Digit5: return GLFW_KEY_5;
     case KeyCode::Space: return GLFW_KEY_SPACE;
     case KeyCode::Shift: return GLFW_KEY_LEFT_SHIFT;
     case KeyCode::Control: return GLFW_KEY_LEFT_CONTROL;

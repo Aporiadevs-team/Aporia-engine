@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -27,22 +28,41 @@ struct PhysicsWorld::Impl {
     std::uint32_t maxSubsteps = 8;
     std::uint32_t lastSubstepCount = 0;
 
+    // O(1) id -> index lookup (bodies only ever grow).
+    std::unordered_map<std::uint64_t, std::size_t> indexById;
+
+    // Uniform spatial-hash broad phase, rebuilt every substep.
+    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> grid;
+    std::vector<std::uint32_t> pairStamp;
+    std::uint32_t pairStampCounter = 0;
+
+    static std::uint64_t packCell(std::int32_t x, std::int32_t y, std::int32_t z) noexcept {
+        const std::uint64_t bx = static_cast<std::uint32_t>(x) & 0x1FFFFFu;
+        const std::uint64_t by = static_cast<std::uint32_t>(y) & 0x1FFFFFu;
+        const std::uint64_t bz = static_cast<std::uint32_t>(z) & 0x1FFFFFu;
+        return bx | (by << 21) | (bz << 42);
+    }
+
+    void gridRange(const apr::Body& body, double cellSize,
+                   std::int32_t& x0, std::int32_t& y0, std::int32_t& z0,
+                   std::int32_t& x1, std::int32_t& y1, std::int32_t& z1) const noexcept {
+        const double r = std::max(body.boundingRadius, 0.05);
+        x0 = static_cast<std::int32_t>(std::floor((body.settings.position.x - r) / cellSize));
+        y0 = static_cast<std::int32_t>(std::floor((body.settings.position.y - r) / cellSize));
+        z0 = static_cast<std::int32_t>(std::floor((body.settings.position.z - r) / cellSize));
+        x1 = static_cast<std::int32_t>(std::floor((body.settings.position.x + r) / cellSize));
+        y1 = static_cast<std::int32_t>(std::floor((body.settings.position.y + r) / cellSize));
+        z1 = static_cast<std::int32_t>(std::floor((body.settings.position.z + r) / cellSize));
+    }
+
     apr::Body* find(std::uint64_t id) noexcept {
-        for (apr::Body& body : bodies) {
-            if (body.id == id) {
-                return &body;
-            }
-        }
-        return nullptr;
+        const auto it = indexById.find(id);
+        return it == indexById.end() ? nullptr : &bodies[it->second];
     }
 
     const apr::Body* find(std::uint64_t id) const noexcept {
-        for (const apr::Body& body : bodies) {
-            if (body.id == id) {
-                return &body;
-            }
-        }
-        return nullptr;
+        const auto it = indexById.find(id);
+        return it == indexById.end() ? nullptr : &bodies[it->second];
     }
 
     static double inverseMass(const apr::Body& body) noexcept {
@@ -255,6 +275,7 @@ struct PhysicsWorld::Impl {
         body.torque = {};
         body.inverseInertia = apr::inverseInertiaFor(body);
         bodies.push_back(std::move(body));
+        indexById[bodies.back().id] = bodies.size() - 1;
         return BodyHandle{bodies.back().id};
     }
 
@@ -280,6 +301,7 @@ struct PhysicsWorld::Impl {
         body.terrainField = field;
         body.inverseInertia = {};
         bodies.push_back(std::move(body));
+        indexById[bodies.back().id] = bodies.size() - 1;
         return BodyHandle{bodies.back().id};
     }
 
@@ -487,32 +509,88 @@ struct PhysicsWorld::Impl {
         lastContactsList.clear();
         activeContacts.clear();
 
-        for (std::size_t firstIndex = 0; firstIndex < bodies.size(); ++firstIndex) {
+        const auto considerPair = [&](std::size_t firstIndex, std::size_t secondIndex) {
             apr::Body& first = bodies[firstIndex];
-            for (std::size_t secondIndex = firstIndex + 1; secondIndex < bodies.size(); ++secondIndex) {
-                apr::Body& second = bodies[secondIndex];
-                if (inverseMass(first) <= 0.0 && inverseMass(second) <= 0.0) {
-                    continue;
-                }
+            apr::Body& second = bodies[secondIndex];
+            if (inverseMass(first) <= 0.0 && inverseMass(second) <= 0.0) {
+                return;
+            }
+            const Vec3 delta = second.settings.position - first.settings.position;
+            const double reach = first.boundingRadius + second.boundingRadius;
+            const bool hasHeightfield = first.colliderType == apr::ColliderType::Heightfield ||
+                                        second.colliderType == apr::ColliderType::Heightfield;
+            if (!hasHeightfield && delta.lengthSquared() > reach * reach) {
+                return;
+            }
+            detectContacts(first, second, scratchContacts);
+            for (const apr::Contact& c : scratchContacts) {
+                apr::ActiveContact active;
+                active.firstIndex = firstIndex;
+                active.secondIndex = secondIndex;
+                active.contact = c;
+                activeContacts.push_back(active);
+            }
+        };
 
-                // Broad phase: bounding-sphere reject before any narrow phase.
-                if (first.colliderType != apr::ColliderType::Heightfield &&
-                    second.colliderType != apr::ColliderType::Heightfield) {
-                    const Vec3 delta = second.settings.position - first.settings.position;
-                    const double reach = first.boundingRadius + second.boundingRadius;
-                    if (delta.lengthSquared() > reach * reach) {
-                        continue;
+        // Uniform spatial-hash broad phase. Only nearby bodies reach the narrow
+        // phase, so a pile of thousands costs far less than the old O(N^2) pair
+        // loop. Heightfields are handled separately (one surface, many bodies).
+        const double cellSize = 2.0;
+        grid.clear();
+        for (std::size_t index = 0; index < bodies.size(); ++index) {
+            const apr::Body& body = bodies[index];
+            if (body.colliderType == apr::ColliderType::Heightfield) {
+                continue;
+            }
+            std::int32_t x0, y0, z0, x1, y1, z1;
+            gridRange(body, cellSize, x0, y0, z0, x1, y1, z1);
+            for (std::int32_t x = x0; x <= x1; ++x) {
+                for (std::int32_t y = y0; y <= y1; ++y) {
+                    for (std::int32_t z = z0; z <= z1; ++z) {
+                        grid[packCell(x, y, z)].push_back(static_cast<std::uint32_t>(index));
                     }
                 }
+            }
+        }
 
-                detectContacts(first, second, scratchContacts);
-                for (const apr::Contact& c : scratchContacts) {
-                    apr::ActiveContact active;
-                    active.firstIndex = firstIndex;
-                    active.secondIndex = secondIndex;
-                    active.contact = c;
-                    activeContacts.push_back(active);
+        pairStamp.assign(bodies.size(), 0);
+        for (std::size_t firstIndex = 0; firstIndex < bodies.size(); ++firstIndex) {
+            const apr::Body& first = bodies[firstIndex];
+            if (first.colliderType == apr::ColliderType::Heightfield) {
+                continue;
+            }
+            ++pairStampCounter;
+            std::int32_t x0, y0, z0, x1, y1, z1;
+            gridRange(first, cellSize, x0, y0, z0, x1, y1, z1);
+            for (std::int32_t x = x0; x <= x1; ++x) {
+                for (std::int32_t y = y0; y <= y1; ++y) {
+                    for (std::int32_t z = z0; z <= z1; ++z) {
+                        const auto cellIt = grid.find(packCell(x, y, z));
+                        if (cellIt == grid.end()) {
+                            continue;
+                        }
+                        for (std::uint32_t other : cellIt->second) {
+                            if (other <= firstIndex || pairStamp[other] == pairStampCounter) {
+                                continue;
+                            }
+                            pairStamp[other] = pairStampCounter;
+                            considerPair(firstIndex, other);
+                        }
+                    }
                 }
+            }
+        }
+
+        for (std::size_t fieldIndex = 0; fieldIndex < bodies.size(); ++fieldIndex) {
+            if (bodies[fieldIndex].colliderType != apr::ColliderType::Heightfield) {
+                continue;
+            }
+            for (std::size_t bodyIndex = 0; bodyIndex < bodies.size(); ++bodyIndex) {
+                if (bodies[bodyIndex].colliderType == apr::ColliderType::Heightfield ||
+                    inverseMass(bodies[bodyIndex]) <= 0.0) {
+                    continue;
+                }
+                considerPair(std::min(fieldIndex, bodyIndex), std::max(fieldIndex, bodyIndex));
             }
         }
 

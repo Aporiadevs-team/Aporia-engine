@@ -114,9 +114,14 @@ private:
         case KeyCode::U: return 'U';
         case KeyCode::X: return 'X';
         case KeyCode::M: return 'M';
+        case KeyCode::T: return 'T';
+        case KeyCode::N: return 'N';
+        case KeyCode::P: return 'P';
         case KeyCode::Digit1: return '1';
         case KeyCode::Digit2: return '2';
         case KeyCode::Digit3: return '3';
+        case KeyCode::Digit4: return '4';
+        case KeyCode::Digit5: return '5';
         case KeyCode::Space: return VK_SPACE;
         case KeyCode::Shift: return VK_SHIFT;
         case KeyCode::Control: return VK_CONTROL;

@@ -456,6 +456,8 @@ int main(int argc, char** argv) {
     bool running = true;
     bool settingsOpen = false;
     bool playerUltra = false;
+    Aporia::AntiAliasingMode aaMode = Aporia::AntiAliasingMode::SMAA;
+    float aaStrength = 0.75f;
     int speedUnits = 1; // 0 = m/s, 1 = km/h, 2 = mph
     double speed = 0.0;
     double odometer = 0.0;
@@ -515,6 +517,20 @@ int main(int argc, char** argv) {
             if (input.keyPressed(Aporia::KeyCode::U)) {
                 playerUltra = !playerUltra;
                 game.graphics().enablePlayerUltraShadows(playerUltra);
+            }
+            if (input.keyPressed(Aporia::KeyCode::Digit4)) {
+                aaStrength = std::max(0.0f, aaStrength - 0.1f);
+                game.graphics().setAntiAliasingStrength(aaStrength);
+            }
+            if (input.keyPressed(Aporia::KeyCode::Digit5)) {
+                aaStrength = std::min(1.0f, aaStrength + 0.1f);
+                game.graphics().setAntiAliasingStrength(aaStrength);
+            }
+            if (input.keyPressed(Aporia::KeyCode::T)) {
+                aaMode = aaMode == Aporia::AntiAliasingMode::None ? Aporia::AntiAliasingMode::SMAA
+                       : aaMode == Aporia::AntiAliasingMode::SMAA ? Aporia::AntiAliasingMode::TAA
+                       : Aporia::AntiAliasingMode::None;
+                game.graphics().setAntiAliasing(aaMode);
             }
         }
 
@@ -697,16 +713,23 @@ int main(int argc, char** argv) {
                  : quality == Aporia::GraphicsQuality::Medium ? "Medium" : "High");
             const std::string ultraLine = std::string("U Player ultra shadows: ") +
                 (playerUltra ? "ON" : "OFF");
+            const char* aaName = aaMode == Aporia::AntiAliasingMode::None ? "None"
+                               : aaMode == Aporia::AntiAliasingMode::SMAA ? "SMAA" : "TAA";
+            char aaLine[64];
+            std::snprintf(aaLine, sizeof(aaLine), "T mode %s   4/5 strength %.2f", aaName,
+                          static_cast<double>(aaStrength));
             ui.cornerRadius = 12.0f;
             ui.blur.mode = Aporia::BlurMode::Kawase;
             ui.blur.radius = 5.0f;
             ui.blur.intensity = 0.9f;
-            ui.roundedRects.push_back({{24.0f, 50.0f, 370.0f, 185.0f}, {0.04f, 0.06f, 0.10f, 0.94f}});
+            ui.roundedRects.push_back({{24.0f, 50.0f, 400.0f, 235.0f}, {0.04f, 0.06f, 0.10f, 0.94f}});
             ui.textRuns.push_back({"GRAPHICS SETTINGS", 48.0f, 72.0f, 24.0f, {0.95f, 0.97f, 1.0f, 1.0f}});
             ui.textRuns.push_back({"1 Low    2 Medium    3 High", 48.0f, 112.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
             ui.textRuns.push_back({ultraLine, 48.0f, 140.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
             ui.textRuns.push_back({qualityLine, 48.0f, 168.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
-            ui.textRuns.push_back({"X close settings", 48.0f, 198.0f, 14.0f, {0.65f, 0.70f, 0.78f, 1.0f}});
+            ui.textRuns.push_back({aaLine, 48.0f, 196.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
+            ui.textRuns.push_back({"4 / 5  strength", 48.0f, 224.0f, 14.0f, {0.65f, 0.70f, 0.78f, 1.0f}});
+            ui.textRuns.push_back({"X close settings", 48.0f, 250.0f, 14.0f, {0.65f, 0.70f, 0.78f, 1.0f}});
         }
         game.graphics().setUiDrawList(std::move(ui));
 

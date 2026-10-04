@@ -299,4 +299,21 @@ void TextureManager::destroyResource(VkDevice device, Resource& texture) noexcep
     texture = {};
 }
 
+bool TextureManager::createSolid(
+        const CreateContext& context,
+        std::uint8_t r,
+        std::uint8_t g,
+        std::uint8_t b,
+        std::uint8_t a,
+        Resource& texture) noexcept {
+    const std::uint8_t pixels[4] = {r, g, b, a};
+    TextureDesc description;
+    description.width = 1;
+    description.height = 1;
+    description.format = TextureFormat::Rgba8Unorm;
+    description.pixels = pixels;
+    description.dataSize = sizeof(pixels);
+    return createResource(context, description, VK_FORMAT_R8G8B8A8_UNORM, 4, 100, texture);
+}
+
 } // namespace Aporia::graphics_internal

@@ -87,6 +87,12 @@ private:
 
 inline constexpr MeshHandle invalidMeshHandle{};
 
+// Distance metric used to pick a level in a level-of-detail group.
+enum class LodBoundary : std::uint8_t {
+    Sphere = 0, // bounding sphere: distance to the sphere surface
+    Box = 1,    // oriented box: distance to the box surface (auto-sized from level 0)
+};
+
 class APORIA_API FontHandle {
 public:
     constexpr FontHandle() noexcept = default;
@@ -262,6 +268,7 @@ struct GraphicsConfig {
     ShadowConfig shadows{};
     bool playerUltraShadows = false;
     AntiAliasingMode antiAliasing = AntiAliasingMode::SMAA;
+    float antiAliasingStrength = 0.75f; // 0 = off, 1 = full blend
     BlurConfig blur{};
 };
 
@@ -271,6 +278,11 @@ struct GraphicsStats {
     std::uint64_t textureCount = 0;
     std::uint64_t boundTextureId = 0;
     std::uint64_t textureUploadCount = 0;
+    // Level-of-detail accounting for the last frame.
+    std::uint64_t lodGroupCount = 0;
+    std::uint64_t lodDrawTriangles = 0;  // triangles submitted after LOD selection
+    std::uint64_t lodFullTriangles = 0;  // triangles level 0 would have submitted
+    std::uint64_t lodSwitchCount = 0;    // cumulative level changes
     std::uint64_t deviceLocalMemory = 0;
     std::uint32_t apiVersion = 0;
     std::uint32_t driverVersion = 0;
@@ -289,6 +301,7 @@ struct GraphicsStats {
     std::uint32_t shadowMapSize = 0;           // sun shadow map edge (px)
     std::uint32_t textureScalePercent = 100;   // texture auto-downscale (100 = native)
     std::uint32_t antiAliasing = 1;             // AntiAliasingMode value
+    float antiAliasingStrength = 0.75f;         // live resolve strength
     double avgFrameMs = 0.0;                   // rolling CPU frame time average
 };
 
@@ -319,7 +332,17 @@ public:
     void setVsync(bool enabled) noexcept;
     [[nodiscard]] bool vsync() const noexcept;
 
+    // Anti-aliasing. Mode changes recompile the resolve pipeline; strength is a
+    // live 0..1 blend knob (0 disables the resolve, 1 applies it fully).
+    void setAntiAliasing(AntiAliasingMode mode);
+    [[nodiscard]] AntiAliasingMode antiAliasing() const noexcept;
+    void setAntiAliasingStrength(float strength) noexcept;
+    [[nodiscard]] float antiAliasingStrength() const noexcept;
+
     [[nodiscard]] bool initialized() const noexcept;
+    // Blocks until the GPU has finished all submitted work. Useful for timing
+    // and for deterministic teardown in tests.
+    void waitIdle() noexcept;
     [[nodiscard]] bool renderFrame() noexcept;
     [[nodiscard]] bool renderHeadlessFrame() noexcept;
 
@@ -349,6 +372,21 @@ public:
     MeshHandle createMesh(const MeshData& data);
     void destroyMesh(MeshHandle handle) noexcept;
     [[nodiscard]] std::uint64_t meshVertexCount(MeshHandle handle) const noexcept;
+
+    // Level-of-detail group. `levels` are ordered from the highest detail to the
+    // lowest; `maxDistances` (ascending, metres) holds one range per level except
+    // the last, which always applies. The distance is measured from the camera
+    // to the item's bounding volume, chosen by `boundary` (sphere or oriented
+    // box, auto-sized from level 0). The returned handle plugs into any place a
+    // MeshHandle is accepted (RenderItem::meshId, MeshRef, ...); the engine
+    // selects the concrete level every frame and reports it in GraphicsStats.
+    MeshHandle createLodMesh(
+        const std::vector<MeshData>& levels,
+        const std::vector<float>& maxDistances,
+        LodBoundary boundary = LodBoundary::Sphere);
+    void destroyLodMesh(MeshHandle handle) noexcept;
+    [[nodiscard]] bool lodMeshValid(MeshHandle handle) const noexcept;
+    [[nodiscard]] std::uint32_t lodLevelCount(MeshHandle handle) const noexcept;
 
     // Bakes a TTF/OTF into an alpha coverage atlas and registers it as a font.
     FontHandle createFontFromTtf(const std::string& ttfPath, float pixelSize = 32.0f);

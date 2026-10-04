@@ -9,6 +9,10 @@
 
 #include "Aporia/Graphics/Graphics.hpp"
 #include "Device/Device.hpp"
+#include "Device/MemoryManager/MemoryManager.hpp"
+#include "Device/SceneManager/Color/ColorTarget.hpp"
+#include "Device/SceneManager/Depth/DepthTarget.hpp"
+#include "Device/Init/RenderPass.hpp"
 #include "Support/Support.hpp"
 #include "Text/FontAtlasBuilder.hpp"
 #include "Hdr/HdrRenderer.hpp"
@@ -27,6 +31,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -239,15 +244,52 @@ struct Graphics::Impl {
     VkPipelineLayout tonemapPipelineLayout = VK_NULL_HANDLE;
     VkShaderModule tonemapVertexShader = VK_NULL_HANDLE;
     VkShaderModule tonemapFragmentShader = VK_NULL_HANDLE;
+    // UI pass (SDF rects + blur): separate pipeline from tonemap, alpha blended.
+    VkShaderModule uiFragmentShader = VK_NULL_HANDLE;
+    VkPipeline uiPipeline = VK_NULL_HANDLE;
     VkDescriptorPool tonemapDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSetLayout tonemapDescriptorLayout = VK_NULL_HANDLE;
     VkDescriptorSet tonemapDescriptorSet = VK_NULL_HANDLE;
+
+    // Temporal anti-aliasing: a resolve pass reprojects the previous frame with
+    // the scene depth. The scene renders with a sub-pixel jitter so the history
+    // accumulates into a supersampled image.
+    VkShaderModule taaFragmentShader = VK_NULL_HANDLE;
+    VkDescriptorSetLayout taaDescriptorLayout = VK_NULL_HANDLE;
+    VkPipelineLayout taaPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline taaPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool taaDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet taaDescriptorSet = VK_NULL_HANDLE;
+    VkBuffer taaUniformBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory taaUniformMemory = VK_NULL_HANDLE;
+    VkImage taaResolveImage = VK_NULL_HANDLE;
+    VkDeviceMemory taaResolveMemory = VK_NULL_HANDLE;
+    VkImageView taaResolveView = VK_NULL_HANDLE;
+    VkFramebuffer taaResolveFramebuffer = VK_NULL_HANDLE;
+    VkImageView taaResolveDepthView = VK_NULL_HANDLE;
+    VkImage taaResolveDepthImage = VK_NULL_HANDLE;
+    VkDeviceMemory taaResolveDepthMemory = VK_NULL_HANDLE;
+    VkImage taaHistoryImage = VK_NULL_HANDLE;
+    VkDeviceMemory taaHistoryMemory = VK_NULL_HANDLE;
+    VkImageView taaHistoryView = VK_NULL_HANDLE;
+    VkSampler taaColorSampler = VK_NULL_HANDLE;
+    VkSampler taaDepthSampler = VK_NULL_HANDLE;
+    std::uint32_t taaWidth = 0;
+    std::uint32_t taaHeight = 0;
+    bool taaResourcesValid = false;
+    bool taaHistoryValid = false;
+    float taaViewProj[16]{};
+    float taaPrevViewProj[16]{};
+    float taaInvViewProj[16]{};
+    std::uint32_t taaFrameIndex = 0;
     bool hdrEnabled = false;
     std::uint32_t antiAliasing = 1;
+    float antiAliasingStrength = 0.75f;
     bool reflectionsEnabled = false;
     int shadowTaps = 9;
     float reflectionScale = 0.0f;
     float shadowStrength = 0.35f;
+    bool shadowsEnabled = true;
     std::uint32_t textureScalePercent = 100;
     double avgFrameMs = 0.0;
     Aporia::EnvironmentState environment{};
@@ -297,6 +339,109 @@ struct Graphics::Impl {
     float pendingProjection[16]{};
     std::vector<RenderItem> pendingItems;
     bool drawDebugTriangle = true;
+
+    // Level-of-detail groups. A group handle resolves to one level mesh per
+    // frame, picked by camera distance and the boundary shape.
+    struct LodGroup {
+        std::vector<std::uint64_t> meshes;  // level mesh ids, near -> far
+        std::vector<float> maxDistances;    // range for every level except the last
+        LodBoundary boundary = LodBoundary::Sphere;
+        float center[3] = {0.0f, 0.0f, 0.0f};      // bounding volume center (mesh-local)
+        float halfExtents[3] = {0.5f, 0.5f, 0.5f}; // bounding volume (mesh-local)
+        float boundingRadius = 0.5f;
+        std::uint32_t lastLevel = 0;
+    };
+    std::unordered_map<std::uint64_t, LodGroup> lodGroups;
+    std::uint64_t lodDrawTriangles = 0;
+    std::uint64_t lodFullTriangles = 0;
+    std::uint64_t lodSwitchCount = 0;
+
+    // Rewrites pendingItems in place: every LOD group id becomes the level id
+    // for the current camera distance. Non-LOD items are left alone.
+    void resolveLodGroups() noexcept {
+        lodDrawTriangles = 0;
+        lodFullTriangles = 0;
+        if (lodGroups.empty()) {
+            return;
+        }
+        const double cameraX = pendingCamera.position[0];
+        const double cameraY = pendingCamera.position[1];
+        const double cameraZ = pendingCamera.position[2];
+        for (RenderItem& item : pendingItems) {
+            const auto groupIt = lodGroups.find(item.meshId);
+            if (groupIt == lodGroups.end()) {
+                continue;
+            }
+            LodGroup& group = groupIt->second;
+            const float* m = item.modelMatrix;
+            const std::array<double, 3> axisX{m[0], m[1], m[2]};
+            const std::array<double, 3> axisY{m[4], m[5], m[6]};
+            const std::array<double, 3> axisZ{m[8], m[9], m[10]};
+            const auto lengthOf = [](const std::array<double, 3>& v) {
+                return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            };
+            const double scaleX = lengthOf(axisX);
+            const double scaleY = lengthOf(axisY);
+            const double scaleZ = lengthOf(axisZ);
+            const double centerX = m[12] + axisX[0] * group.center[0] + axisY[0] * group.center[1] + axisZ[0] * group.center[2];
+            const double centerY = m[13] + axisX[1] * group.center[0] + axisY[1] * group.center[1] + axisZ[1] * group.center[2];
+            const double centerZ = m[14] + axisX[2] * group.center[0] + axisY[2] * group.center[1] + axisZ[2] * group.center[2];
+            const double deltaX = cameraX - centerX;
+            const double deltaY = cameraY - centerY;
+            const double deltaZ = cameraZ - centerZ;
+
+            double distance = 0.0;
+            if (group.boundary == LodBoundary::Box && scaleX > 1.0e-6 && scaleY > 1.0e-6 && scaleZ > 1.0e-6) {
+                const auto unit = [&](const std::array<double, 3>& v, double length) {
+                    return std::array<double, 3>{v[0] / length, v[1] / length, v[2] / length};
+                };
+                const std::array<double, 3> ux = unit(axisX, scaleX);
+                const std::array<double, 3> uy = unit(axisY, scaleY);
+                const std::array<double, 3> uz = unit(axisZ, scaleZ);
+                const double extentX = scaleX * group.halfExtents[0];
+                const double extentY = scaleY * group.halfExtents[1];
+                const double extentZ = scaleZ * group.halfExtents[2];
+                const auto project = [&](const std::array<double, 3>& u) {
+                    return deltaX * u[0] + deltaY * u[1] + deltaZ * u[2];
+                };
+                const double px = std::clamp(project(ux), -extentX, extentX);
+                const double py = std::clamp(project(uy), -extentY, extentY);
+                const double pz = std::clamp(project(uz), -extentZ, extentZ);
+                const double closestX = ux[0] * px + uy[0] * py + uz[0] * pz;
+                const double closestY = ux[1] * px + uy[1] * py + uz[1] * pz;
+                const double closestZ = ux[2] * px + uy[2] * py + uz[2] * pz;
+                const double ox = deltaX - closestX;
+                const double oy = deltaY - closestY;
+                const double oz = deltaZ - closestZ;
+                distance = std::sqrt(ox * ox + oy * oy + oz * oz);
+            } else {
+                const double radius = group.boundingRadius * std::max({scaleX, scaleY, scaleZ});
+                const double centerDistance = std::sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+                distance = std::max(0.0, centerDistance - radius);
+            }
+
+            std::uint32_t level = static_cast<std::uint32_t>(group.meshes.size() - 1);
+            for (std::uint32_t candidate = 0; candidate + 1 < group.meshes.size(); ++candidate) {
+                if (distance <= group.maxDistances[candidate]) {
+                    level = candidate;
+                    break;
+                }
+            }
+            if (level != group.lastLevel) {
+                ++lodSwitchCount;
+                group.lastLevel = level;
+            }
+
+            const std::uint64_t fullId = group.meshes.front();
+            const std::uint64_t drawId = group.meshes[level];
+            item.meshId = drawId;
+            const auto drawIt = meshes.find(drawId);
+            const auto fullIt = meshes.find(fullId);
+            lodDrawTriangles += drawIt != meshes.end() ? drawIt->second.indexCount / 3u : 0u;
+            lodFullTriangles += fullIt != meshes.end() ? fullIt->second.indexCount / 3u : 0u;
+        }
+    }
+
 
     // Camera mirrored across z = environment.mirrorZ for the planar
     // reflection pass (Z-up world). Forward direction comes from the view
@@ -423,18 +568,145 @@ struct Graphics::Impl {
     Aporia::GraphicsQuality activeQuality = Aporia::GraphicsQuality::Medium;
     float shadowExtent = 30.0f;
 
+    // Rebuilds the mesh pipelines with the current shadow-tap / reflection
+    // specialization. Quality presets change these, so the pipelines must be
+    // recompiled on setQuality (otherwise High never actually kicks in).
+    bool rebuildMeshPipelines() {
+        if (device == VK_NULL_HANDLE || meshPipelineLayout == VK_NULL_HANDLE ||
+            meshVertexShader == VK_NULL_HANDLE || meshFragmentShader == VK_NULL_HANDLE) {
+            return false;
+        }
+        vkDeviceWaitIdle(device);
+        if (meshPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, meshPipeline, nullptr);
+            meshPipeline = VK_NULL_HANDLE;
+        }
+        if (hdrMeshPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, hdrMeshPipeline, nullptr);
+            hdrMeshPipeline = VK_NULL_HANDLE;
+        }
+
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = meshVertexShader;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = meshFragmentShader;
+        stages[1].pName = "main";
+
+        VkVertexInputBindingDescription vertexBinding{};
+        vertexBinding.binding = 0;
+        vertexBinding.stride = static_cast<std::uint32_t>(sizeof(MeshVertex));
+        vertexBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        std::array<VkVertexInputAttributeDescription, 3> attributes{};
+        attributes[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, position)};
+        attributes[1] = {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, normal)};
+        attributes[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(MeshVertex, uv)};
+        VkPipelineVertexInputStateCreateInfo vertexInput{};
+        vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInput.vertexBindingDescriptionCount = 1;
+        vertexInput.pVertexBindingDescriptions = &vertexBinding;
+        vertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(attributes.size());
+        vertexInput.pVertexAttributeDescriptions = attributes.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rasterization{};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo multisample{};
+        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+        depthStencil.minDepthBounds = 0.0f;
+        depthStencil.maxDepthBounds = 1.0f;
+        VkPipelineColorBlendAttachmentState colorAttachment{};
+        colorAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo colorBlend{};
+        colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlend.attachmentCount = 1;
+        colorBlend.pAttachments = &colorAttachment;
+        const VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = 2;
+        dynamicState.pDynamicStates = dynamicStates;
+
+        VkSpecializationMapEntry specEntries[2]{};
+        specEntries[0].constantID = 0;
+        specEntries[0].offset = 0;
+        specEntries[0].size = sizeof(std::int32_t);
+        specEntries[1].constantID = 1;
+        specEntries[1].offset = sizeof(std::int32_t);
+        specEntries[1].size = sizeof(float);
+        float specReflection = reflectionsEnabled ? 1.0f : 0.0f;
+        std::int32_t specTaps = shadowTaps;
+        std::int32_t specData[2] = {specTaps, 0};
+        std::memcpy(specData + 1, &specReflection, sizeof(float));
+        VkSpecializationInfo specInfo{};
+        specInfo.mapEntryCount = 2;
+        specInfo.pMapEntries = specEntries;
+        specInfo.dataSize = sizeof(specData);
+        specInfo.pData = specData;
+        stages[1].pSpecializationInfo = &specInfo;
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = stages;
+        pipelineInfo.pVertexInputState = &vertexInput;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisample;
+        pipelineInfo.pDepthStencilState = &depthStencil;
+        pipelineInfo.pColorBlendState = &colorBlend;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = meshPipelineLayout;
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipeline) != VK_SUCCESS) {
+            setError("vkCreateGraphicsPipelines(mesh, preset) failed");
+            return false;
+        }
+        if (hdrRenderPass != VK_NULL_HANDLE) {
+            pipelineInfo.renderPass = hdrRenderPass;
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &hdrMeshPipeline) != VK_SUCCESS) {
+                setError("vkCreateGraphicsPipelines(hdr mesh, preset) failed");
+                return false;
+            }
+        }
+        return true;
+    }
+
+
     bool createBufferWithData(
         VkDeviceSize size,
         const void* data,
         VkBufferUsageFlags usage,
         VkBuffer& buffer,
         VkDeviceMemory& memory) {
-        graphics_internal::MeshRenderer::UploadContext context;
+        graphics_internal::MemoryManager::Context context;
         context.device = device;
         context.memoryProperties = memoryProperties;
         context.commandBuffer = commandBuffer;
         context.queue = queue;
-        if (!graphics_internal::MeshRenderer::uploadBuffer(
+        if (!graphics_internal::MemoryManager::uploadBuffer(
                 context, size, data, usage, buffer, memory)) {
             setError("Buffer upload failed");
             return false;
@@ -486,7 +758,7 @@ struct Graphics::Impl {
     }
 
     bool createDepthImage(VkExtent2D extent, VkImage& image, VkDeviceMemory& memory, VkImageView& view) {
-        if (!graphics_internal::HdrRenderer::createDepthImage(
+        if (!graphics_internal::DepthTarget::create(
                 device, memoryProperties, depthFormat, extent, image, memory, view)) {
             setError("Depth image creation failed");
             return false;
@@ -524,7 +796,373 @@ struct Graphics::Impl {
 
     // ---------- quality pass resources ----------
 
+    // Column-major 4x4 inverse (gluInvertMatrix); returns false if singular.
+    static bool invertMat4(const float* m, float* out) noexcept {
+        const double inv[16] = {
+            m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10],
+            -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10],
+            m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6],
+            -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6],
+            -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10],
+            m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10],
+            -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6],
+            m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6],
+            m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9],
+            -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9],
+            m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5],
+            -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5],
+            -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9],
+            m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9],
+            -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5],
+            m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5],
+        };
+        const double determinant = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+        if (std::abs(determinant) < 1.0e-12) {
+            return false;
+        }
+        const double scale = 1.0 / determinant;
+        for (int index = 0; index < 16; ++index) {
+            out[index] = static_cast<float>(inv[index] * scale);
+        }
+        return true;
+    }
+
+    // Radical-inverse sequence used for the sub-pixel TAA jitter.
+    static double halton(std::uint32_t index, std::uint32_t base) noexcept {
+        double result = 0.0;
+        double fraction = 1.0;
+        while (index > 0) {
+            fraction /= static_cast<double>(base);
+            result += fraction * static_cast<double>(index % base);
+            index /= base;
+        }
+        return result;
+    }
+
+    void writeTaaUniforms() {
+        if (taaUniformMemory == VK_NULL_HANDLE) {
+            return;
+        }
+        void* mapped = nullptr;
+        if (vkMapMemory(device, taaUniformMemory, 0, 160, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
+            return;
+        }
+        struct TaaUniforms {
+            float prevViewProj[16];
+            float invViewProj[16];
+            float params[4];
+            float resolution[4];
+        } uniforms{};
+        std::memcpy(uniforms.prevViewProj, taaPrevViewProj, sizeof(uniforms.prevViewProj));
+        std::memcpy(uniforms.invViewProj, taaInvViewProj, sizeof(uniforms.invViewProj));
+        uniforms.params[0] = antiAliasingStrength;
+        uniforms.params[1] = taaHistoryValid ? 1.0f : 0.0f;
+        uniforms.params[2] = taaWidth != 0 ? 1.0f / static_cast<float>(taaWidth) : 0.0f;
+        uniforms.params[3] = taaHeight != 0 ? 1.0f / static_cast<float>(taaHeight) : 0.0f;
+        uniforms.resolution[0] = static_cast<float>(taaWidth);
+        uniforms.resolution[1] = static_cast<float>(taaHeight);
+        std::memcpy(mapped, &uniforms, sizeof(uniforms));
+        vkUnmapMemory(device, taaUniformMemory);
+    }
+
+    void destroyTaaResources() noexcept {
+        if (device != VK_NULL_HANDLE) {
+            if (taaPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(device, taaPipeline, nullptr); }
+            if (taaPipelineLayout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, taaPipelineLayout, nullptr); }
+            if (taaDescriptorPool != VK_NULL_HANDLE) { vkDestroyDescriptorPool(device, taaDescriptorPool, nullptr); }
+            if (taaDescriptorLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(device, taaDescriptorLayout, nullptr); }
+            if (taaResolveFramebuffer != VK_NULL_HANDLE) { vkDestroyFramebuffer(device, taaResolveFramebuffer, nullptr); }
+            if (taaResolveDepthView != VK_NULL_HANDLE) { vkDestroyImageView(device, taaResolveDepthView, nullptr); }
+            if (taaResolveDepthImage != VK_NULL_HANDLE) { vkDestroyImage(device, taaResolveDepthImage, nullptr); }
+            if (taaResolveDepthMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaResolveDepthMemory, nullptr); }
+            if (taaResolveView != VK_NULL_HANDLE) { vkDestroyImageView(device, taaResolveView, nullptr); }
+            if (taaResolveImage != VK_NULL_HANDLE) { vkDestroyImage(device, taaResolveImage, nullptr); }
+            if (taaResolveMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaResolveMemory, nullptr); }
+            if (taaHistoryView != VK_NULL_HANDLE) { vkDestroyImageView(device, taaHistoryView, nullptr); }
+            if (taaHistoryImage != VK_NULL_HANDLE) { vkDestroyImage(device, taaHistoryImage, nullptr); }
+            if (taaHistoryMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaHistoryMemory, nullptr); }
+            if (taaColorSampler != VK_NULL_HANDLE) { vkDestroySampler(device, taaColorSampler, nullptr); }
+            if (taaDepthSampler != VK_NULL_HANDLE) { vkDestroySampler(device, taaDepthSampler, nullptr); }
+            if (taaUniformBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(device, taaUniformBuffer, nullptr); }
+            if (taaUniformMemory != VK_NULL_HANDLE) { vkFreeMemory(device, taaUniformMemory, nullptr); }
+        }
+        taaResolveFramebuffer = VK_NULL_HANDLE;
+        taaResolveDepthView = VK_NULL_HANDLE;
+        taaResolveDepthImage = VK_NULL_HANDLE;
+        taaResolveDepthMemory = VK_NULL_HANDLE;
+        taaResolveView = VK_NULL_HANDLE;
+        taaResolveImage = VK_NULL_HANDLE;
+        taaResolveMemory = VK_NULL_HANDLE;
+        taaHistoryView = VK_NULL_HANDLE;
+        taaHistoryImage = VK_NULL_HANDLE;
+        taaHistoryMemory = VK_NULL_HANDLE;
+        taaColorSampler = VK_NULL_HANDLE;
+        taaDepthSampler = VK_NULL_HANDLE;
+        taaDescriptorSet = VK_NULL_HANDLE;
+        taaDescriptorPool = VK_NULL_HANDLE;
+        taaDescriptorLayout = VK_NULL_HANDLE;
+        taaPipelineLayout = VK_NULL_HANDLE;
+        taaPipeline = VK_NULL_HANDLE;
+        taaUniformBuffer = VK_NULL_HANDLE;
+        taaUniformMemory = VK_NULL_HANDLE;
+        taaWidth = 0;
+        taaHeight = 0;
+        taaResourcesValid = false;
+        taaHistoryValid = false;
+    }
+
+    bool createTaaResources(std::uint32_t width, std::uint32_t height) {
+        if (taaResourcesValid && width == taaWidth && height == taaHeight) {
+            return true;
+        }
+        destroyTaaResources();
+        if (width == 0 || height == 0 || hdrRenderPass == VK_NULL_HANDLE || taaFragmentShader == VK_NULL_HANDLE) {
+            return false;
+        }
+
+        if (!createColorTarget(hdrFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, width, height, hdrRenderPass,
+                               taaResolveView, taaResolveFramebuffer, taaResolveImage, taaResolveMemory,
+                               taaResolveDepthView, taaResolveDepthImage, taaResolveDepthMemory)) {
+            setError("TAA resolve target creation failed");
+            return false;
+        }
+        VkFramebuffer ignoredFramebuffer = VK_NULL_HANDLE;
+        VkImageView ignoredDepthView = VK_NULL_HANDLE;
+        VkImage ignoredDepthImage = VK_NULL_HANDLE;
+        VkDeviceMemory ignoredDepthMemory = VK_NULL_HANDLE;
+        if (!createColorTarget(hdrFormat, VK_IMAGE_USAGE_TRANSFER_DST_BIT, width, height, VK_NULL_HANDLE,
+                               taaHistoryView, ignoredFramebuffer, taaHistoryImage, taaHistoryMemory,
+                               ignoredDepthView, ignoredDepthImage, ignoredDepthMemory)) {
+            setError("TAA history target creation failed");
+            return false;
+        }
+
+        VkSamplerCreateInfo colorSamplerInfo{};
+        colorSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        colorSamplerInfo.magFilter = VK_FILTER_LINEAR;
+        colorSamplerInfo.minFilter = VK_FILTER_LINEAR;
+        colorSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        colorSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        colorSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        colorSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        colorSamplerInfo.maxLod = 1.0f;
+        if (vkCreateSampler(device, &colorSamplerInfo, nullptr, &taaColorSampler) != VK_SUCCESS) {
+            setError("TAA color sampler creation failed");
+            return false;
+        }
+        VkSamplerCreateInfo depthSamplerInfo{};
+        depthSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        depthSamplerInfo.magFilter = VK_FILTER_NEAREST;
+        depthSamplerInfo.minFilter = VK_FILTER_NEAREST;
+        depthSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        depthSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        depthSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        depthSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        depthSamplerInfo.maxLod = 0.0f;
+        if (vkCreateSampler(device, &depthSamplerInfo, nullptr, &taaDepthSampler) != VK_SUCCESS) {
+            setError("TAA depth sampler creation failed");
+            return false;
+        }
+
+        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+        for (std::uint32_t index = 0; index < 3; ++index) {
+            bindings[index].binding = index;
+            bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[index].descriptorCount = 1;
+            bindings[index].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
+        bindings[3].binding = 3;
+        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[3].descriptorCount = 1;
+        bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo taaLayoutInfo{};
+        taaLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        taaLayoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
+        taaLayoutInfo.pBindings = bindings.data();
+        if (vkCreateDescriptorSetLayout(device, &taaLayoutInfo, nullptr, &taaDescriptorLayout) != VK_SUCCESS) {
+            setError("TAA descriptor layout creation failed");
+            return false;
+        }
+        VkPipelineLayoutCreateInfo taaPipelineInfo{};
+        taaPipelineInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        taaPipelineInfo.setLayoutCount = 1;
+        taaPipelineInfo.pSetLayouts = &taaDescriptorLayout;
+        if (vkCreatePipelineLayout(device, &taaPipelineInfo, nullptr, &taaPipelineLayout) != VK_SUCCESS) {
+            setError("TAA pipeline layout creation failed");
+            return false;
+        }
+
+        VkDescriptorPoolSize poolSizes[2]{};
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[0].descriptorCount = 3;
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[1].descriptorCount = 1;
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = 1;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = poolSizes;
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &taaDescriptorPool) != VK_SUCCESS) {
+            setError("TAA descriptor pool creation failed");
+            return false;
+        }
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = taaDescriptorPool;
+        allocateInfo.descriptorSetCount = 1;
+        allocateInfo.pSetLayouts = &taaDescriptorLayout;
+        if (vkAllocateDescriptorSets(device, &allocateInfo, &taaDescriptorSet) != VK_SUCCESS) {
+            setError("TAA descriptor set allocation failed");
+            return false;
+        }
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = 160; // 2 mat4 + 2 vec4
+        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &taaUniformBuffer) != VK_SUCCESS) {
+            setError("TAA uniform buffer creation failed");
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device, taaUniformBuffer, &requirements);
+        std::uint32_t memoryType = 0;
+        if (!findMemoryType(memoryProperties, requirements.memoryTypeBits,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, memoryType)) {
+            setError("No host-visible memory for TAA uniforms");
+            return false;
+        }
+        VkMemoryAllocateInfo uniformAllocate{};
+        uniformAllocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        uniformAllocate.allocationSize = requirements.size;
+        uniformAllocate.memoryTypeIndex = memoryType;
+        if (vkAllocateMemory(device, &uniformAllocate, nullptr, &taaUniformMemory) != VK_SUCCESS ||
+            vkBindBufferMemory(device, taaUniformBuffer, taaUniformMemory, 0) != VK_SUCCESS) {
+            setError("TAA uniform buffer memory allocation failed");
+            return false;
+        }
+
+        VkDescriptorImageInfo currentInfo{};
+        currentInfo.sampler = hdrSampler;
+        currentInfo.imageView = hdrView;
+        currentInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo historyInfo{};
+        historyInfo.sampler = taaColorSampler;
+        historyInfo.imageView = taaHistoryView;
+        historyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo depthInfo{};
+        depthInfo.sampler = taaDepthSampler;
+        depthInfo.imageView = hdrDepthView;
+        depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorBufferInfo uniformInfo{};
+        uniformInfo.buffer = taaUniformBuffer;
+        uniformInfo.offset = 0;
+        uniformInfo.range = 160;
+        std::array<VkWriteDescriptorSet, 4> writes{};
+        for (std::uint32_t index = 0; index < 4; ++index) {
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = taaDescriptorSet;
+            writes[index].dstBinding = index;
+            writes[index].descriptorCount = 1;
+        }
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo = &currentInfo;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &historyInfo;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[2].pImageInfo = &depthInfo;
+        writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[3].pBufferInfo = &uniformInfo;
+        vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+        // Fullscreen resolve pipeline.
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = tonemapVertexShader;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = taaFragmentShader;
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo emptyInput{};
+        emptyInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkPipelineInputAssemblyStateCreateInfo assembly{};
+        assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rasterization{};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo multisample{};
+        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo colorBlend{};
+        colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlend.attachmentCount = 1;
+        colorBlend.pAttachments = &blendAttachment;
+        const VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = 2;
+        dynamicState.pDynamicStates = dynamicStates;
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = stages;
+        pipelineInfo.pVertexInputState = &emptyInput;
+        pipelineInfo.pInputAssemblyState = &assembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisample;
+        pipelineInfo.pDepthStencilState = &depthStencil;
+        pipelineInfo.pColorBlendState = &colorBlend;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = taaPipelineLayout;
+        pipelineInfo.renderPass = hdrRenderPass;
+        pipelineInfo.subpass = 0;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &taaPipeline) != VK_SUCCESS) {
+            setError("TAA pipeline creation failed");
+            return false;
+        }
+
+        taaWidth = width;
+        taaHeight = height;
+        taaResourcesValid = true;
+        taaHistoryValid = false;
+
+        // Tonemap must read the resolved image while TAA is active.
+        if (tonemapDescriptorSet != VK_NULL_HANDLE) {
+            VkDescriptorImageInfo resolveInfo{};
+            resolveInfo.sampler = hdrSampler;
+            resolveInfo.imageView = taaResolveView;
+            resolveInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = tonemapDescriptorSet;
+            write.dstBinding = 0;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.descriptorCount = 1;
+            write.pImageInfo = &resolveInfo;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+        return true;
+    }
+
     void destroyQualityTargets() noexcept {
+        destroyTaaResources();
         if (device != VK_NULL_HANDLE) {
             if (hdrFramebuffer != VK_NULL_HANDLE) {
                 vkDestroyFramebuffer(device, hdrFramebuffer, nullptr);
@@ -645,7 +1283,7 @@ struct Graphics::Impl {
         VkImageView& outDepthView,
         VkImage& outDepthImage,
         VkDeviceMemory& outDepthMemory) {
-        if (!graphics_internal::HdrRenderer::createColorTarget(
+        if (!graphics_internal::ColorTarget::create(
                 device, memoryProperties, depthFormat, format, extraUsage, width, height,
                 compatibleRenderPass, outView, outFramebuffer, outImage, outMemory,
                 outDepthView, outDepthImage, outDepthMemory)) {
@@ -669,7 +1307,7 @@ struct Graphics::Impl {
                 return false;
             }
         }
-        if (!graphics_internal::HdrRenderer::createRenderPass(
+        if (!graphics_internal::RenderPassFactory::create(
                 device, colorFormat, depthFormat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, reflectRenderPass)) {
             setError("vkCreateRenderPass(reflect) failed");
             return false;
@@ -947,18 +1585,19 @@ struct Graphics::Impl {
 
 
     bool createDefaultTexture() {
-        constexpr std::uint8_t pixels[] = {255, 255, 255, 255};
-        TextureDesc description;
-        description.width = 1;
-        description.height = 1;
-        description.format = TextureFormat::Rgba8Unorm;
-        description.pixels = pixels;
-        description.dataSize = sizeof(pixels);
+        graphics_internal::TextureManager::CreateContext context;
+        context.device = device;
+        context.physicalDevice = physicalDevice;
+        context.memoryProperties = memoryProperties;
+        context.commandBuffer = commandBuffer;
+        context.queue = queue;
 
         TextureResource texture;
-        if (!createTextureResource(description, texture)) {
+        if (!graphics_internal::TextureManager::createSolid(context, 255, 255, 255, 255, texture)) {
+            setError("Default texture creation failed");
             return false;
         }
+        ++textureUploadCount;
         const std::uint64_t id = nextTextureId++;
         try {
             const auto result = textures.emplace(id, std::move(texture));
@@ -1102,7 +1741,7 @@ struct Graphics::Impl {
         uniforms.cameraPosition[1] = static_cast<float>(pendingCamera.position[1]);
         uniforms.cameraPosition[2] = static_cast<float>(pendingCamera.position[2]);
         uniforms.shadingParams[0] = 0.32f; // ambient
-        uniforms.shadingParams[1] = shadowStrength;
+        uniforms.shadingParams[1] = shadowsEnabled ? shadowStrength : 1.0f;
         uniforms.shadingParams[2] = environment.mirrorZ;
         uniforms.shadingParams[3] = shadowMapSize > 0 ? 1.0f / static_cast<float>(shadowMapSize) : 0.0f;
         uniforms.screenParams[0] = static_cast<float>(hdrEnabled ? hdrWidth : (headless ? renderWidth : swapchainExtent.width));
@@ -1192,6 +1831,12 @@ struct Graphics::Impl {
             write.descriptorCount = 1;
             write.pImageInfo = &hdrDescriptor;
             vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
+
+        if (hdrEnabled && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA) {
+            if (!createTaaResources(hdrWidth, hdrHeight)) {
+                return false;
+            }
         }
 
         if (reflectionsEnabled) {
@@ -1297,7 +1942,7 @@ struct Graphics::Impl {
         const VkImageLayout finalLayout = headless
             ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
             : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        if (!graphics_internal::HdrRenderer::createRenderPass(
+        if (!graphics_internal::RenderPassFactory::create(
                 device, colorFormat, depthFormat, finalLayout, renderPass)) {
             setError("vkCreateRenderPass failed");
             return false;
@@ -1318,7 +1963,7 @@ struct Graphics::Impl {
                 return false;
             }
         }
-        if (!graphics_internal::HdrRenderer::createRenderPass(
+        if (!graphics_internal::RenderPassFactory::create(
                 device, hdrFormat, depthFormat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, hdrRenderPass)) {
             setError("vkCreateRenderPass(hdr) failed");
             return false;
@@ -1737,8 +2382,11 @@ struct Graphics::Impl {
         context.commandBuffer = commandBuffer;
         context.renderPass = renderPass;
         context.pipeline = tonemapPipeline;
+        context.uiPipeline = uiPipeline;
         context.pipelineLayout = tonemapPipelineLayout;
         context.descriptorSet = tonemapDescriptorSet;
+        context.antiAliasingStrength = antiAliasingStrength;
+        context.antiAliasingMode = static_cast<std::int32_t>(antiAliasing);
         graphics_internal::HdrRenderer::renderTonemap(
             context, target, width, height,
             [this, width, height](VkCommandBuffer buffer, VkPipelineLayout layout) {
@@ -1767,7 +2415,7 @@ struct Graphics::Impl {
         buildSunMatrix(sunMatrix);
         writeSceneUniforms(uniformSlot, sunMatrix);
 
-        if (shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
+        if (shadowsEnabled && shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
             renderShadowMap();
         }
 
@@ -1870,6 +2518,138 @@ struct Graphics::Impl {
             vkCmdEndRenderPass(commandBuffer);
         }
 
+        if (useHdr && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA &&
+            taaResourcesValid && taaResolveFramebuffer != VK_NULL_HANDLE && taaPipeline != VK_NULL_HANDLE) {
+            writeTaaUniforms();
+
+            const VkImageLayout historyOldLayout = taaHistoryValid
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+            std::array<VkImageMemoryBarrier, 2> toShaderRead{};
+            VkImageMemoryBarrier& depthBarrier = toShaderRead[0];
+            depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            depthBarrier.image = hdrDepthImage;
+            depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            depthBarrier.subresourceRange.levelCount = 1;
+            depthBarrier.subresourceRange.layerCount = 1;
+            depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            VkImageMemoryBarrier& historyBarrier = toShaderRead[1];
+            historyBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            historyBarrier.oldLayout = historyOldLayout;
+            historyBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            historyBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            historyBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            historyBarrier.image = taaHistoryImage;
+            historyBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            historyBarrier.subresourceRange.levelCount = 1;
+            historyBarrier.subresourceRange.layerCount = 1;
+            historyBarrier.srcAccessMask = taaHistoryValid ? VK_ACCESS_SHADER_READ_BIT : 0;
+            historyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(commandBuffer,
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+                static_cast<std::uint32_t>(toShaderRead.size()), toShaderRead.data());
+
+            std::array<VkClearValue, 2> taaClear{};
+            taaClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            taaClear[1].depthStencil = {1.0f, 0};
+            VkRenderPassBeginInfo taaBegin{};
+            taaBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            taaBegin.renderPass = hdrRenderPass;
+            taaBegin.framebuffer = taaResolveFramebuffer;
+            taaBegin.renderArea.extent = {taaWidth, taaHeight};
+            taaBegin.clearValueCount = static_cast<std::uint32_t>(taaClear.size());
+            taaBegin.pClearValues = taaClear.data();
+            vkCmdBeginRenderPass(commandBuffer, &taaBegin, VK_SUBPASS_CONTENTS_INLINE);
+            VkViewport taaViewport{};
+            taaViewport.width = static_cast<float>(taaWidth);
+            taaViewport.height = static_cast<float>(taaHeight);
+            taaViewport.maxDepth = 1.0f;
+            vkCmdSetViewport(commandBuffer, 0, 1, &taaViewport);
+            VkRect2D taaScissor{};
+            taaScissor.extent = {taaWidth, taaHeight};
+            vkCmdSetScissor(commandBuffer, 0, 1, &taaScissor);
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, taaPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    taaPipelineLayout, 0, 1, &taaDescriptorSet, 0, nullptr);
+            vkCmdDraw(commandBuffer, 4, 1, 0, 0);
+            vkCmdEndRenderPass(commandBuffer);
+
+            std::array<VkImageMemoryBarrier, 2> toTransfer{};
+            VkImageMemoryBarrier& resolveSource = toTransfer[0];
+            resolveSource.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            resolveSource.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            resolveSource.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            resolveSource.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolveSource.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolveSource.image = taaResolveImage;
+            resolveSource.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            resolveSource.subresourceRange.levelCount = 1;
+            resolveSource.subresourceRange.layerCount = 1;
+            resolveSource.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            resolveSource.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            VkImageMemoryBarrier& historyDestination = toTransfer[1];
+            historyDestination.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            historyDestination.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            historyDestination.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            historyDestination.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            historyDestination.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            historyDestination.image = taaHistoryImage;
+            historyDestination.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            historyDestination.subresourceRange.levelCount = 1;
+            historyDestination.subresourceRange.layerCount = 1;
+            historyDestination.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            historyDestination.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                static_cast<std::uint32_t>(toTransfer.size()), toTransfer.data());
+            VkImageCopy copyRegion{};
+            copyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copyRegion.srcSubresource.mipLevel = 0;
+            copyRegion.srcSubresource.baseArrayLayer = 0;
+            copyRegion.srcSubresource.layerCount = 1;
+            copyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copyRegion.dstSubresource.mipLevel = 0;
+            copyRegion.dstSubresource.baseArrayLayer = 0;
+            copyRegion.dstSubresource.layerCount = 1;
+            copyRegion.extent = {taaWidth, taaHeight, 1};
+            vkCmdCopyImage(commandBuffer, taaResolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           taaHistoryImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+            std::array<VkImageMemoryBarrier, 2> toRead{};
+            VkImageMemoryBarrier& resolveBack = toRead[0];
+            resolveBack.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            resolveBack.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            resolveBack.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            resolveBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolveBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            resolveBack.image = taaResolveImage;
+            resolveBack.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            resolveBack.subresourceRange.levelCount = 1;
+            resolveBack.subresourceRange.layerCount = 1;
+            resolveBack.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            resolveBack.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            VkImageMemoryBarrier& historyBack = toRead[1];
+            historyBack.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            historyBack.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            historyBack.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            historyBack.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            historyBack.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            historyBack.image = taaHistoryImage;
+            historyBack.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            historyBack.subresourceRange.levelCount = 1;
+            historyBack.subresourceRange.layerCount = 1;
+            historyBack.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            historyBack.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+                static_cast<std::uint32_t>(toRead.size()), toRead.data());
+            taaHistoryValid = true;
+        }
+
         if (useHdr) {
             renderTonemap(targetFramebuffer, width, height);
         }
@@ -1931,6 +2711,7 @@ struct Graphics::Impl {
                 graphics_internal::MeshRenderer::destroyResource(device, entry.second);
             }
             meshes.clear();
+            lodGroups.clear();
             nextMeshId = 1;
             pendingItems.clear();
             destroyHeadlessTarget();
@@ -1981,6 +2762,19 @@ struct Graphics::Impl {
                 vkDestroyShaderModule(device, tonemapFragmentShader, nullptr);
                 tonemapFragmentShader = VK_NULL_HANDLE;
             }
+            destroyTaaResources();
+            if (taaFragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, taaFragmentShader, nullptr);
+                taaFragmentShader = VK_NULL_HANDLE;
+            }
+            if (uiPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, uiPipeline, nullptr);
+                uiPipeline = VK_NULL_HANDLE;
+            }
+            if (uiFragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, uiFragmentShader, nullptr);
+                uiFragmentShader = VK_NULL_HANDLE;
+            }
             if (renderPass != VK_NULL_HANDLE) {
                 vkDestroyRenderPass(device, renderPass, nullptr);
                 renderPass = VK_NULL_HANDLE;
@@ -2017,6 +2811,7 @@ struct Graphics::Impl {
                 graphics_internal::MeshRenderer::destroyResource(device, entry.second);
             }
             meshes.clear();
+            lodGroups.clear();
             nextMeshId = 1;
             pendingItems.clear();
             destroyQualityTargets();
@@ -2114,6 +2909,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->shadowExtent = config.shadowExtent;
     impl_->applyQualityPreset(config.quality);
     impl_->antiAliasing = static_cast<std::uint32_t>(config.antiAliasing);
+    impl_->antiAliasingStrength = std::clamp(config.antiAliasingStrength, 0.0f, 1.0f);
     impl_->blurConfig = config.blur;
     impl_->shadowConfig = config.shadows;
     impl_->shadowConfig.mapSize = std::max(1u, config.shadows.mapSize);
@@ -2124,6 +2920,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->shadowMapSize = impl_->shadowConfig.mapSize;
     impl_->shadowTaps = static_cast<int>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
     impl_->shadowStrength = impl_->shadowConfig.strength;
+    impl_->shadowsEnabled = impl_->shadowConfig.enabled;
     impl_->shadowRenderer.setConfig(impl_->shadowConfig);
     impl_->shadowRenderer.setPlayerUltra(impl_->playerUltraShadows);
     impl_->hdrRenderer.setAntiAliasing(config.antiAliasing);
@@ -2706,6 +3503,38 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         return false;
     }
 
+    const std::vector<std::uint32_t> taaFragmentCode = readSpirv(shaderDirectory + "/taa.frag.spv", spirvLoaded);
+    if (!spirvLoaded) {
+        impl_->setError("Failed to load compiled TAA shader");
+        shutdown();
+        return false;
+    }
+    VkShaderModuleCreateInfo taaFragmentModuleInfo{};
+    taaFragmentModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    taaFragmentModuleInfo.codeSize = taaFragmentCode.size() * sizeof(std::uint32_t);
+    taaFragmentModuleInfo.pCode = taaFragmentCode.data();
+    if (vkCreateShaderModule(impl_->device, &taaFragmentModuleInfo, nullptr, &impl_->taaFragmentShader) != VK_SUCCESS) {
+        impl_->setError("vkCreateShaderModule(taa fragment) failed");
+        shutdown();
+        return false;
+    }
+
+    const std::vector<std::uint32_t> uiFragmentCode = readSpirv(shaderDirectory + "/ui.frag.spv", spirvLoaded);
+    if (!spirvLoaded) {
+        impl_->setError("Failed to load compiled UI shader");
+        shutdown();
+        return false;
+    }
+    VkShaderModuleCreateInfo uiFragmentModuleInfo{};
+    uiFragmentModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    uiFragmentModuleInfo.codeSize = uiFragmentCode.size() * sizeof(std::uint32_t);
+    uiFragmentModuleInfo.pCode = uiFragmentCode.data();
+    if (vkCreateShaderModule(impl_->device, &uiFragmentModuleInfo, nullptr, &impl_->uiFragmentShader) != VK_SUCCESS) {
+        impl_->setError("vkCreateShaderModule(ui fragment) failed");
+        shutdown();
+        return false;
+    }
+
     VkDescriptorSetLayoutBinding hdrSamplerBinding{};
     hdrSamplerBinding.binding = 0;
     hdrSamplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -2727,7 +3556,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     VkPushConstantRange tonemapPushRange{};
     tonemapPushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     tonemapPushRange.offset = 0;
-    tonemapPushRange.size = sizeof(graphics_internal::RectRenderer::PushConstants);
+    tonemapPushRange.size = sizeof(graphics_internal::RectRenderer::PushConstants) + 16;
     tonemapPipelineLayoutInfo.pushConstantRangeCount = 1;
     tonemapPipelineLayoutInfo.pPushConstantRanges = &tonemapPushRange;
     if (vkCreatePipelineLayout(impl_->device, &tonemapPipelineLayoutInfo, nullptr, &impl_->tonemapPipelineLayout) != VK_SUCCESS) {
@@ -2758,17 +3587,6 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     tonemapStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     tonemapStages[1].module = impl_->tonemapFragmentShader;
     tonemapStages[1].pName = "main";
-    VkSpecializationMapEntry aaEntry{};
-    aaEntry.constantID = 0;
-    aaEntry.offset = 0;
-    aaEntry.size = sizeof(std::int32_t);
-    const std::int32_t aaMode = static_cast<std::int32_t>(impl_->antiAliasing);
-    VkSpecializationInfo aaSpecialization{};
-    aaSpecialization.mapEntryCount = 1;
-    aaSpecialization.pMapEntries = &aaEntry;
-    aaSpecialization.dataSize = sizeof(aaMode);
-    aaSpecialization.pData = &aaMode;
-    tonemapStages[1].pSpecializationInfo = &aaSpecialization;
 
     VkPipelineVertexInputStateCreateInfo emptyVertexInput{};
     emptyVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -2794,6 +3612,37 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     tonemapPipelineInfo.subpass = 0;
     if (vkCreateGraphicsPipelines(impl_->device, VK_NULL_HANDLE, 1, &tonemapPipelineInfo, nullptr, &impl_->tonemapPipeline) != VK_SUCCESS) {
         impl_->setError("vkCreateGraphicsPipelines(tonemap) failed");
+        shutdown();
+        return false;
+    }
+
+    // UI pipeline: same layout/render pass and vertex shader as tonemap, but the
+    // SDF/blur fragment shader composited with straight alpha over the frame.
+    VkPipelineShaderStageCreateInfo uiStages[2]{};
+    uiStages[0] = tonemapStages[0];
+    uiStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    uiStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    uiStages[1].module = impl_->uiFragmentShader;
+    uiStages[1].pName = "main";
+    VkPipelineColorBlendAttachmentState uiBlendAttachment{};
+    uiBlendAttachment.blendEnable = VK_TRUE;
+    uiBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    uiBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    uiBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    uiBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    uiBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    uiBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    uiBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                       VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo uiColorBlend{};
+    uiColorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    uiColorBlend.attachmentCount = 1;
+    uiColorBlend.pAttachments = &uiBlendAttachment;
+    VkGraphicsPipelineCreateInfo uiPipelineInfo = tonemapPipelineInfo;
+    uiPipelineInfo.pStages = uiStages;
+    uiPipelineInfo.pColorBlendState = &uiColorBlend;
+    if (vkCreateGraphicsPipelines(impl_->device, VK_NULL_HANDLE, 1, &uiPipelineInfo, nullptr, &impl_->uiPipeline) != VK_SUCCESS) {
+        impl_->setError("vkCreateGraphicsPipelines(ui) failed");
         shutdown();
         return false;
     }
@@ -2838,7 +3687,10 @@ bool Graphics::setQuality(GraphicsQuality quality) {
         return true;
     }
     impl_->applyQualityPreset(quality);
-    return impl_->rebuildQualityTargets();
+    if (!impl_->rebuildQualityTargets()) {
+        return false;
+    }
+    return impl_->rebuildMeshPipelines();
 }
 
 void Graphics::setShadowConfig(const ShadowConfig& config) {
@@ -2853,6 +3705,7 @@ void Graphics::setShadowConfig(const ShadowConfig& config) {
     impl_->shadowMapSize = impl_->shadowConfig.mapSize;
     impl_->shadowTaps = static_cast<int>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
     impl_->shadowStrength = impl_->shadowConfig.strength;
+    impl_->shadowsEnabled = impl_->shadowConfig.enabled;
     if (initialized()) {
         impl_->rebuildQualityTargets();
     }
@@ -2900,9 +3753,44 @@ bool Graphics::vsync() const noexcept {
     return impl_ != nullptr && impl_->deviceService.vsync;
 }
 
+void Graphics::setAntiAliasing(AntiAliasingMode mode) {
+    if (!impl_) {
+        return;
+    }
+    impl_->antiAliasing = static_cast<std::uint32_t>(mode);
+    impl_->hdrRenderer.setAntiAliasing(mode);
+    if (initialized()) {
+        impl_->rebuildQualityTargets();
+    }
+}
+
+AntiAliasingMode Graphics::antiAliasing() const noexcept {
+    if (!impl_) {
+        return AntiAliasingMode::None;
+    }
+    return static_cast<AntiAliasingMode>(impl_->antiAliasing);
+}
+
+void Graphics::setAntiAliasingStrength(float strength) noexcept {
+    if (!impl_) {
+        return;
+    }
+    impl_->antiAliasingStrength = std::clamp(strength, 0.0f, 1.0f);
+}
+
+float Graphics::antiAliasingStrength() const noexcept {
+    return impl_ != nullptr ? impl_->antiAliasingStrength : 0.0f;
+}
+
 
 bool Graphics::initialized() const noexcept {
     return impl_ && impl_->instance != VK_NULL_HANDLE && impl_->device != VK_NULL_HANDLE && impl_->pipeline != VK_NULL_HANDLE;
+}
+
+void Graphics::waitIdle() noexcept {
+    if (impl_ && impl_->device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(impl_->device);
+    }
 }
 
 bool Graphics::renderFrame() noexcept {
@@ -3309,6 +4197,10 @@ void Graphics::destroyMesh(MeshHandle handle) noexcept {
         impl_->lastError = "Graphics is not initialized";
         return;
     }
+    if (impl_->lodGroups.find(handle.value()) != impl_->lodGroups.end()) {
+        destroyLodMesh(handle);
+        return;
+    }
     const auto meshIt = impl_->meshes.find(handle.value());
     if (meshIt == impl_->meshes.end()) {
         impl_->lastError = "Mesh handle is invalid";
@@ -3325,8 +4217,134 @@ std::uint64_t Graphics::meshVertexCount(MeshHandle handle) const noexcept {
     if (!impl_ || !handle.valid()) {
         return 0;
     }
+    const auto groupIt = impl_->lodGroups.find(handle.value());
+    if (groupIt != impl_->lodGroups.end()) {
+        if (groupIt->second.meshes.empty()) {
+            return 0;
+        }
+        const auto meshIt = impl_->meshes.find(groupIt->second.meshes.front());
+        return meshIt == impl_->meshes.end() ? 0 : meshIt->second.vertexCount;
+    }
     const auto meshIt = impl_->meshes.find(handle.value());
     return meshIt == impl_->meshes.end() ? 0 : meshIt->second.vertexCount;
+}
+
+MeshHandle Graphics::createLodMesh(
+    const std::vector<MeshData>& levels,
+    const std::vector<float>& maxDistances,
+    LodBoundary boundary) {
+    if (!impl_) {
+        return invalidMeshHandle;
+    }
+    if (!initialized()) {
+        impl_->setError("Graphics is not initialized");
+        return invalidMeshHandle;
+    }
+    if (levels.size() < 2) {
+        impl_->setError("LOD group needs at least two levels");
+        return invalidMeshHandle;
+    }
+    if (maxDistances.size() + 1 != levels.size()) {
+        impl_->setError("LOD group needs one range per level except the last");
+        return invalidMeshHandle;
+    }
+    for (std::size_t index = 0; index < maxDistances.size(); ++index) {
+        if (!std::isfinite(maxDistances[index]) || maxDistances[index] < 0.0f) {
+            impl_->setError("LOD range must be finite and non-negative");
+            return invalidMeshHandle;
+        }
+        if (index > 0 && maxDistances[index] <= maxDistances[index - 1]) {
+            impl_->setError("LOD ranges must be strictly ascending");
+            return invalidMeshHandle;
+        }
+    }
+
+    // Bounds come from level 0 so the boundary is the same for every level.
+    Impl::LodGroup group;
+    for (int axis = 0; axis < 3; ++axis) {
+        group.center[axis] = 0.0f;
+        group.halfExtents[axis] = 0.0f;
+    }
+    float minimum[3] = {
+        std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::infinity()};
+    float maximum[3] = {
+        -std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity()};
+    for (const MeshVertex& vertex : levels.front().vertices) {
+        for (int axis = 0; axis < 3; ++axis) {
+            minimum[axis] = std::min(minimum[axis], vertex.position[axis]);
+            maximum[axis] = std::max(maximum[axis], vertex.position[axis]);
+        }
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        group.center[axis] = (minimum[axis] + maximum[axis]) * 0.5f;
+        group.halfExtents[axis] = std::max((maximum[axis] - minimum[axis]) * 0.5f, 1.0e-3f);
+    }
+    group.boundingRadius = std::sqrt(
+        group.halfExtents[0] * group.halfExtents[0] +
+        group.halfExtents[1] * group.halfExtents[1] +
+        group.halfExtents[2] * group.halfExtents[2]);
+    group.boundary = boundary;
+    group.maxDistances = maxDistances;
+
+    for (const MeshData& level : levels) {
+        const MeshHandle levelHandle = createMesh(level);
+        if (!levelHandle.valid()) {
+            for (std::uint64_t created : group.meshes) {
+                destroyMesh(MeshHandle{created});
+            }
+            return invalidMeshHandle;
+        }
+        group.meshes.push_back(levelHandle.value());
+    }
+
+    const std::uint64_t id = impl_->nextMeshId++;
+    try {
+        const auto result = impl_->lodGroups.emplace(id, std::move(group));
+        if (!result.second) {
+            impl_->setError("LOD group handle allocation failed");
+            return invalidMeshHandle;
+        }
+    } catch (...) {
+        impl_->setError("LOD group allocation failed");
+        return invalidMeshHandle;
+    }
+    engineLog("lod group created: id=%llu levels=%zu",
+              static_cast<unsigned long long>(id),
+              levels.size());
+    return MeshHandle{id};
+}
+
+void Graphics::destroyLodMesh(MeshHandle handle) noexcept {
+    if (!impl_ || !handle.valid()) {
+        return;
+    }
+    const auto groupIt = impl_->lodGroups.find(handle.value());
+    if (groupIt == impl_->lodGroups.end()) {
+        return;
+    }
+    const std::vector<std::uint64_t> levels = groupIt->second.meshes;
+    impl_->lodGroups.erase(groupIt);
+    for (std::uint64_t level : levels) {
+        destroyMesh(MeshHandle{level});
+    }
+}
+
+bool Graphics::lodMeshValid(MeshHandle handle) const noexcept {
+    return impl_ != nullptr && handle.valid() && impl_->lodGroups.count(handle.value()) != 0;
+}
+
+std::uint32_t Graphics::lodLevelCount(MeshHandle handle) const noexcept {
+    if (!impl_ || !handle.valid()) {
+        return 0;
+    }
+    const auto groupIt = impl_->lodGroups.find(handle.value());
+    return groupIt == impl_->lodGroups.end()
+        ? 0
+        : static_cast<std::uint32_t>(groupIt->second.meshes.size());
 }
 
 FontHandle Graphics::createFontFromTtf(const std::string& ttfPath, float pixelSize) {
@@ -3439,10 +4457,33 @@ bool Graphics::render(const CameraState& camera, const EnvironmentState& environ
     }
     impl_->pendingCamera = camera;
     impl_->environment = environment;
-    Impl::multiplyMat4(camera.projectionMatrix, camera.viewMatrix, impl_->pendingViewProj);
-    std::memcpy(impl_->pendingProjection, camera.projectionMatrix, sizeof(impl_->pendingProjection));
+
+    float projection[16];
+    std::memcpy(projection, camera.projectionMatrix, sizeof(projection));
+    const bool taaActive = static_cast<AntiAliasingMode>(impl_->antiAliasing) == AntiAliasingMode::TAA &&
+                           impl_->hdrEnabled;
+    if (taaActive) {
+        // Sub-pixel jitter (Halton 2,3) gives TAA real new samples to accumulate.
+        const std::uint32_t targetWidth = impl_->hdrWidth != 0 ? impl_->hdrWidth : impl_->renderWidth;
+        const std::uint32_t targetHeight = impl_->hdrHeight != 0 ? impl_->hdrHeight : impl_->renderHeight;
+        if (targetWidth > 0 && targetHeight > 0) {
+            const double jitterX = Impl::halton(impl_->taaFrameIndex + 1, 2) - 0.5;
+            const double jitterY = Impl::halton(impl_->taaFrameIndex + 1, 3) - 0.5;
+            projection[8] += static_cast<float>(jitterX * 2.0 / static_cast<double>(targetWidth));
+            projection[9] += static_cast<float>(jitterY * 2.0 / static_cast<double>(targetHeight));
+        }
+        ++impl_->taaFrameIndex;
+    }
+
+    std::memcpy(impl_->taaPrevViewProj, impl_->taaViewProj, sizeof(impl_->taaPrevViewProj));
+    Impl::multiplyMat4(projection, camera.viewMatrix, impl_->pendingViewProj);
+    std::memcpy(impl_->pendingProjection, projection, sizeof(impl_->pendingProjection));
+    std::memcpy(impl_->taaViewProj, impl_->pendingViewProj, sizeof(impl_->taaViewProj));
+    Impl::invertMat4(impl_->pendingViewProj, impl_->taaInvViewProj);
+
     impl_->pendingItems = items;
     impl_->drawDebugTriangle = items.empty();
+    impl_->resolveLodGroups();
     return renderFrame();
 }
 
@@ -3610,6 +4651,10 @@ GraphicsStats Graphics::stats() const noexcept {
     result.textureCount = static_cast<std::uint64_t>(impl_->textures.size());
     result.boundTextureId = impl_->boundTexture.value();
     result.textureUploadCount = impl_->textureUploadCount;
+    result.lodGroupCount = static_cast<std::uint64_t>(impl_->lodGroups.size());
+    result.lodDrawTriangles = impl_->lodDrawTriangles;
+    result.lodFullTriangles = impl_->lodFullTriangles;
+    result.lodSwitchCount = impl_->lodSwitchCount;
     result.headless = impl_->headless;
     result.nativeWindow = !impl_->headless;
     result.surfaceWidth = impl_->swapchainExtent.width;
@@ -3630,6 +4675,7 @@ GraphicsStats Graphics::stats() const noexcept {
     result.shadowMapSize = impl_->shadowMapSize;
     result.textureScalePercent = impl_->textureScalePercent;
     result.antiAliasing = impl_->antiAliasing;
+    result.antiAliasingStrength = impl_->antiAliasingStrength;
     result.avgFrameMs = impl_->avgFrameMs;
     for (std::uint32_t heap = 0; heap < impl_->memoryProperties.memoryHeapCount; ++heap) {
         if ((impl_->memoryProperties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
