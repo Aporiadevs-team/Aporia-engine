@@ -70,6 +70,7 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Device/SceneManager/HeadlessTarget/HeadlessTarget.cpp
         src/Device/SceneManager/SceneBindings/SceneBindings.cpp
         src/Device/Init/RenderPass.cpp
+        src/Device/Swapchain/Swapchain.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
         src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp

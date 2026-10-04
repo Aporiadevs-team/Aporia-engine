@@ -15,6 +15,7 @@
 #include "Device/SceneManager/HeadlessTarget/HeadlessTarget.hpp"
 #include "Device/SceneManager/SceneBindings/SceneBindings.hpp"
 #include "Device/Init/RenderPass.hpp"
+#include "Device/Swapchain/Swapchain.hpp"
 #include "Support/Support.hpp"
 #include "Text/FontAtlasBuilder.hpp"
 #include "Hdr/HdrRenderer.hpp"
@@ -1372,39 +1373,23 @@ struct Graphics::Impl {
     }
 
     bool configureNativeSurface() {
-#if !defined(_WIN32)
-        setError("Native Vulkan windows are currently supported only on Windows");
-        return false;
-#else
-        if (surface == VK_NULL_HANDLE || window == nullptr) {
-            setError("Native Vulkan surface is not configured");
-            return false;
-        }
-        if (getPhysicalDeviceSurfaceSupport == nullptr ||
-            getPhysicalDeviceSurfaceCapabilities == nullptr ||
-            getPhysicalDeviceSurfaceFormats == nullptr ||
-            getPhysicalDeviceSurfacePresentModes == nullptr) {
-            setError("Vulkan surface extension entry points are unavailable");
-            return false;
-        }
-
-        VkBool32 supported = VK_FALSE;
-        if (getPhysicalDeviceSurfaceSupport(physicalDevice, graphicsFamily, surface, &supported) != VK_SUCCESS || supported != VK_TRUE) {
-            setError("Vulkan graphics queue does not support the native surface");
-            return false;
-        }
-
-        VkSurfaceFormatKHR selectedFormat{};
-        if (!chooseSurfaceFormat(physicalDevice, surface, selectedFormat)) {
-            setError("No supported Vulkan surface format");
-            return false;
-        }
-        surfaceFormat = selectedFormat;
-        swapchainColorSpace = selectedFormat.colorSpace;
-        colorFormat = selectedFormat.format;
-        presentMode = choosePresentMode(physicalDevice, surface, deviceService.vsync);
-        return true;
-#endif
+        graphics_internal::SwapchainState state{
+            surface, colorFormat, swapchainColorSpace, presentMode, swapchain,
+            swapchainImages, swapchainViews, swapchainFramebuffers, swapchainExtent,
+            swapchainDepthViews, swapchainDepthImages, swapchainDepthMemory};
+        graphics_internal::SwapchainContext context;
+        context.device = device;
+        context.physicalDevice = physicalDevice;
+        context.memoryProperties = memoryProperties;
+        context.graphicsFamily = graphicsFamily;
+        context.vsync = deviceService.vsync;
+        context.window = window;
+        context.api = {getPhysicalDeviceSurfaceSupport, getPhysicalDeviceSurfaceCapabilities,
+                       getPhysicalDeviceSurfaceFormats, getPhysicalDeviceSurfacePresentModes,
+                       createSwapchain, destroySwapchain, getSwapchainImages};
+        context.state = &state;
+        context.error = &lastError;
+        return graphics_internal::configureSurface(context);
     }
 
     bool createRenderPass() {
@@ -1466,132 +1451,18 @@ struct Graphics::Impl {
     }
 
     void destroySwapchainResources() noexcept {
-        if (device == VK_NULL_HANDLE) {
-            swapchainImages.clear();
-            swapchainViews.clear();
-            swapchainFramebuffers.clear();
-            swapchainDepthViews.clear();
-            swapchainDepthImages.clear();
-            swapchainDepthMemory.clear();
-            swapchain = VK_NULL_HANDLE;
-            swapchainExtent = {0, 0};
-            return;
-        }
-        for (VkFramebuffer framebufferHandle : swapchainFramebuffers) {
-            vkDestroyFramebuffer(device, framebufferHandle, nullptr);
-        }
-        for (VkImageView imageView : swapchainViews) {
-            vkDestroyImageView(device, imageView, nullptr);
-        }
-        if (swapchain != VK_NULL_HANDLE && destroySwapchain != nullptr) {
-            destroySwapchain(device, swapchain, nullptr);
-        }
-        swapchainFramebuffers.clear();
-        swapchainViews.clear();
-        swapchainImages.clear();
-        for (VkImageView view : swapchainDepthViews) {
-            vkDestroyImageView(device, view, nullptr);
-        }
-        for (VkImage image : swapchainDepthImages) {
-            vkDestroyImage(device, image, nullptr);
-        }
-        for (VkDeviceMemory memory : swapchainDepthMemory) {
-            vkFreeMemory(device, memory, nullptr);
-        }
-        swapchainDepthViews.clear();
-        swapchainDepthImages.clear();
-        swapchainDepthMemory.clear();
-        swapchain = VK_NULL_HANDLE;
-        swapchainExtent = {0, 0};
+        graphics_internal::SwapchainState state{
+            surface, colorFormat, swapchainColorSpace, presentMode, swapchain,
+            swapchainImages, swapchainViews, swapchainFramebuffers, swapchainExtent,
+            swapchainDepthViews, swapchainDepthImages, swapchainDepthMemory};
+        graphics_internal::SwapchainContext context;
+        context.device = device;
+        context.api.destroySwapchain = destroySwapchain;
+        context.state = &state;
+        graphics_internal::destroySwapchain(context);
     }
 
     bool createSwapchainResources() {
-#if !defined(_WIN32)
-        setError("Native Vulkan swapchains are currently supported only on Windows");
-        return false;
-#else
-        if (surface == VK_NULL_HANDLE || window == nullptr || getPhysicalDeviceSurfaceCapabilities == nullptr) {
-            setError("Native Vulkan swapchain is not configured");
-            return false;
-        }
-
-        VkSurfaceCapabilitiesKHR capabilities{};
-        if (getPhysicalDeviceSurfaceCapabilities(physicalDevice, surface, &capabilities) != VK_SUCCESS) {
-            setError("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed");
-            return false;
-        }
-
-        VkExtent2D clientExtent{};
-        if (!getWindowExtent(window, clientExtent)) {
-            setError("Native window has no drawable client area");
-            return false;
-        }
-
-        VkExtent2D desiredExtent = clientExtent;
-        if (capabilities.currentExtent.width != std::numeric_limits<std::uint32_t>::max()) {
-            desiredExtent = capabilities.currentExtent;
-        } else {
-            desiredExtent.width = std::max(capabilities.minImageExtent.width,
-                                           std::min(capabilities.maxImageExtent.width, desiredExtent.width));
-            desiredExtent.height = std::max(capabilities.minImageExtent.height,
-                                            std::min(capabilities.maxImageExtent.height, desiredExtent.height));
-        }
-        if (desiredExtent.width == 0 || desiredExtent.height == 0) {
-            setError("Native window has zero-sized swapchain extent");
-            return false;
-        }
-
-        VkSwapchainCreateInfoKHR swapchainInfo{};
-        swapchainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        swapchainInfo.surface = surface;
-        swapchainInfo.minImageCount = capabilities.minImageCount;
-        swapchainInfo.imageFormat = colorFormat;
-        swapchainInfo.imageColorSpace = swapchainColorSpace;
-        swapchainInfo.imageExtent = desiredExtent;
-        swapchainInfo.imageArrayLayers = 1;
-        swapchainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        swapchainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        swapchainInfo.preTransform = capabilities.currentTransform;
-        swapchainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        swapchainInfo.presentMode = presentMode;
-        swapchainInfo.clipped = VK_TRUE;
-        swapchainInfo.oldSwapchain = swapchain;
-        if (createSwapchain == nullptr || getSwapchainImages == nullptr) {
-            setError("Vulkan swapchain entry points are unavailable");
-            return false;
-        }
-        if (createSwapchain(device, &swapchainInfo, nullptr, &swapchain) != VK_SUCCESS) {
-            setError("vkCreateSwapchainKHR failed");
-            return false;
-        }
-
-        std::uint32_t imageCount = 0;
-        if (getSwapchainImages(device, swapchain, &imageCount, nullptr) != VK_SUCCESS || imageCount == 0) {
-            setError("vkGetSwapchainImagesKHR failed");
-            return false;
-        }
-        swapchainImages.resize(imageCount);
-        if (getSwapchainImages(device, swapchain, &imageCount, swapchainImages.data()) != VK_SUCCESS) {
-            setError("vkGetSwapchainImagesKHR failed");
-            return false;
-        }
-
-        swapchainViews.resize(swapchainImages.size());
-        for (std::size_t index = 0; index < swapchainImages.size(); ++index) {
-            VkImageViewCreateInfo viewInfo{};
-            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            viewInfo.image = swapchainImages[index];
-            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewInfo.format = colorFormat;
-            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            viewInfo.subresourceRange.levelCount = 1;
-            viewInfo.subresourceRange.layerCount = 1;
-            if (vkCreateImageView(device, &viewInfo, nullptr, &swapchainViews[index]) != VK_SUCCESS) {
-                setError("vkCreateImageView(swapchain) failed");
-                return false;
-            }
-        }
-
         if (depthFormat == VK_FORMAT_UNDEFINED) {
             depthFormat = chooseDepthFormat();
             if (depthFormat == VK_FORMAT_UNDEFINED) {
@@ -1599,41 +1470,30 @@ struct Graphics::Impl {
                 return false;
             }
         }
-        swapchainDepthViews.resize(swapchainImages.size());
-        swapchainDepthImages.resize(swapchainImages.size());
-        swapchainDepthMemory.resize(swapchainImages.size());
-        for (std::size_t index = 0; index < swapchainImages.size(); ++index) {
-            if (!createDepthImage(desiredExtent, swapchainDepthImages[index], swapchainDepthMemory[index], swapchainDepthViews[index])) {
-                return false;
-            }
+        graphics_internal::SwapchainState state{
+            surface, colorFormat, swapchainColorSpace, presentMode, swapchain,
+            swapchainImages, swapchainViews, swapchainFramebuffers, swapchainExtent,
+            swapchainDepthViews, swapchainDepthImages, swapchainDepthMemory};
+        graphics_internal::SwapchainContext context;
+        context.device = device;
+        context.physicalDevice = physicalDevice;
+        context.memoryProperties = memoryProperties;
+        context.graphicsFamily = graphicsFamily;
+        context.window = window;
+        context.renderPass = renderPass;
+        context.depthFormat = depthFormat;
+        context.api = {getPhysicalDeviceSurfaceSupport, getPhysicalDeviceSurfaceCapabilities,
+                       getPhysicalDeviceSurfaceFormats, getPhysicalDeviceSurfacePresentModes,
+                       createSwapchain, destroySwapchain, getSwapchainImages};
+        context.state = &state;
+        context.error = &lastError;
+        if (!graphics_internal::createSwapchain(context)) {
+            return false;
         }
-
-        swapchainFramebuffers.resize(swapchainImages.size());
-        for (std::size_t index = 0; index < swapchainViews.size(); ++index) {
-            std::array<VkImageView, 2> attachments{swapchainViews[index], swapchainDepthViews[index]};
-            VkFramebufferCreateInfo framebufferInfo{};
-            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            framebufferInfo.renderPass = renderPass;
-            framebufferInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
-            framebufferInfo.pAttachments = attachments.data();
-            framebufferInfo.width = desiredExtent.width;
-            framebufferInfo.height = desiredExtent.height;
-            framebufferInfo.layers = 1;
-            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapchainFramebuffers[index]) != VK_SUCCESS) {
-                setError("vkCreateFramebuffer(swapchain) failed");
-                return false;
-            }
-        }
-
-        swapchainExtent = desiredExtent;
         engineLog("swapchain created: %ux%u images=%zu fmt=%d present=%d",
-                  desiredExtent.width,
-                  desiredExtent.height,
-                  swapchainImages.size(),
-                  static_cast<int>(colorFormat),
-                  static_cast<int>(presentMode));
+                  state.extent.width, state.extent.height, state.images.size(),
+                  static_cast<int>(colorFormat), static_cast<int>(presentMode));
         return true;
-#endif
     }
 
     bool recreateSwapchain() noexcept {
