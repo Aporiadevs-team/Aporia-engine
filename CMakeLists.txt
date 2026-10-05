@@ -25,6 +25,12 @@ option(APORIA_ENABLE_SOFTBODY "Enable the soft body module" OFF)
 option(APORIA_ENABLE_AUDIO "Enable the audio module" OFF)
 option(APORIA_ENABLE_SCRIPTING "Enable the scripting module" OFF)
 option(APORIA_ENABLE_NETWORKING "Enable the networking module" OFF)
+# Experimental fast-path build. Off by default: the stable engine and tests are
+# unchanged. When ON, the new (unstable) features live here first, get tested,
+# and only then graduate into the stable path. Current exp features:
+#   - multi-texture per-item materials (4 diffuse layers + 2 masks)
+#   - (planned) multithreaded frame recording
+option(APORIA_EXPERIMENTAL "Enable experimental features (unstable)" OFF)
 
 if(APORIA_ENABLE_VULKAN AND NOT APORIA_ENABLE_GRAPHICS)
     message(FATAL_ERROR "APORIA_ENABLE_VULKAN requires APORIA_ENABLE_GRAPHICS")
@@ -258,6 +264,9 @@ if(APORIA_ENABLE_GRAPHICS)
     target_compile_definitions(AporiaEngine PRIVATE
         "APORIA_VULKAN_SHADER_DIR=\"${APORIA_VULKAN_SHADER_DIR}\""
     )
+    if(APORIA_EXPERIMENTAL)
+        target_compile_definitions(AporiaEngine PUBLIC APORIA_EXPERIMENTAL=1)
+    endif()
     target_link_libraries(AporiaEngine PRIVATE Vulkan::Vulkan)
     if(WIN32)
         target_link_libraries(AporiaEngine PRIVATE user32)
