@@ -227,6 +227,18 @@ struct Graphics::Impl {
     // Quality pass resources. One scene uniform buffer + descriptor set per
     // frame-in-flight slot; shadow/reflection maps are stable shared images.
     graphics_internal::SceneBindings scene;
+#if defined(APORIA_EXPERIMENTAL)
+    // EXPERIMENTAL per-item multi-layer materials (set = 1).
+    VkDescriptorSetLayout materialDescriptorLayout = VK_NULL_HANDLE;
+    VkDescriptorPool materialDescriptorPool = VK_NULL_HANDLE;
+    std::unordered_map<std::uint64_t, VkDescriptorSet> materialSets;
+    std::unordered_map<std::uint64_t, VkBuffer> materialBuffers;
+    std::unordered_map<std::uint64_t, VkDeviceMemory> materialMemory;
+    VkDescriptorSet defaultMaterialSet = VK_NULL_HANDLE;
+    VkBuffer defaultMaterialBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory defaultMaterialMemory = VK_NULL_HANDLE;
+    std::uint64_t nextMaterialId = 1;
+#endif
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
     VkShaderModule shadowVertexShader = VK_NULL_HANDLE;
@@ -1082,6 +1094,175 @@ struct Graphics::Impl {
         return true;
     }
 
+#if defined(APORIA_EXPERIMENTAL)
+    bool createMaterialLayout() {
+        if (materialDescriptorLayout != VK_NULL_HANDLE) {
+            return true;
+        }
+        VkDescriptorSetLayoutBinding bindings[7]{};
+        for (int index = 0; index < 6; ++index) {
+            bindings[index].binding = static_cast<std::uint32_t>(index);
+            bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[index].descriptorCount = 1;
+            bindings[index].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
+        bindings[6].binding = 6;
+        bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[6].descriptorCount = 1;
+        bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 7;
+        layoutInfo.pBindings = bindings;
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &materialDescriptorLayout) != VK_SUCCESS) {
+            setError("material descriptor layout creation failed");
+            return false;
+        }
+        return true;
+    }
+
+    bool createMaterialPool() {
+        if (materialDescriptorPool != VK_NULL_HANDLE) {
+            return true;
+        }
+        VkDescriptorPoolSize poolSizes[2]{};
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[0].descriptorCount = 64 * 6;
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[1].descriptorCount = 64;
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        poolInfo.maxSets = 64;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = poolSizes;
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescriptorPool) != VK_SUCCESS) {
+            setError("material descriptor pool creation failed");
+            return false;
+        }
+        return true;
+    }
+
+    VkDescriptorSet buildMaterialSet(const MaterialDesc& description, VkBuffer& outBuffer, VkDeviceMemory& outMemory) {
+        outBuffer = VK_NULL_HANDLE;
+        outMemory = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = materialDescriptorPool;
+        allocateInfo.descriptorSetCount = 1;
+        allocateInfo.pSetLayouts = &materialDescriptorLayout;
+        if (vkAllocateDescriptorSets(device, &allocateInfo, &set) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+
+        // Per-layer UV transform UBO (binding 6).
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = 32; // 2 vec4
+        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &outBuffer) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        VkMemoryRequirements bufferRequirements{};
+        vkGetBufferMemoryRequirements(device, outBuffer, &bufferRequirements);
+        std::uint32_t memoryType = 0;
+        if (!findMemoryType(memoryProperties, bufferRequirements.memoryTypeBits,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, memoryType)) {
+            return VK_NULL_HANDLE;
+        }
+        VkMemoryAllocateInfo bufferAllocate{};
+        bufferAllocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        bufferAllocate.allocationSize = bufferRequirements.size;
+        bufferAllocate.memoryTypeIndex = memoryType;
+        if (vkAllocateMemory(device, &bufferAllocate, nullptr, &outMemory) != VK_SUCCESS ||
+            vkBindBufferMemory(device, outBuffer, outMemory, 0) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        void* mapped = nullptr;
+        if (vkMapMemory(device, outMemory, 0, 32, 0, &mapped) == VK_SUCCESS && mapped != nullptr) {
+            float uv[8] = {1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            for (int index = 0; index < 4; ++index) {
+                uv[index] = description.uvScale[index];
+                uv[4 + index] = description.uvOffset[index];
+            }
+            std::memcpy(mapped, uv, sizeof(uv));
+            vkUnmapMemory(device, outMemory);
+        }
+
+        const auto defaultIt = textures.find(defaultTexture.value());
+        const auto& fallback = defaultIt->second;
+        VkDescriptorImageInfo imageInfos[6]{};
+        std::array<VkWriteDescriptorSet, 7> writes{};
+        for (int index = 0; index < 6; ++index) {
+            const TextureHandle handle = index < 4 ? description.diffuse[index] : description.mask[index - 4];
+            const auto it = textures.find(handle.value());
+            const auto& resource = it != textures.end() ? it->second : fallback;
+            imageInfos[index].sampler = resource.sampler;
+            imageInfos[index].imageView = resource.view;
+            imageInfos[index].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = set;
+            writes[index].dstBinding = static_cast<std::uint32_t>(index);
+            writes[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[index].descriptorCount = 1;
+            writes[index].pImageInfo = &imageInfos[index];
+        }
+        VkDescriptorBufferInfo layerDescriptor{};
+        layerDescriptor.buffer = outBuffer;
+        layerDescriptor.offset = 0;
+        layerDescriptor.range = 32;
+        writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[6].dstSet = set;
+        writes[6].dstBinding = 6;
+        writes[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[6].descriptorCount = 1;
+        writes[6].pBufferInfo = &layerDescriptor;
+        vkUpdateDescriptorSets(device, 7, writes.data(), 0, nullptr);
+        return set;
+    }
+
+    bool createDefaultMaterial() {
+        if (!createMaterialLayout() || !createMaterialPool()) {
+            return false;
+        }
+        defaultMaterialSet = buildMaterialSet(MaterialDesc{}, defaultMaterialBuffer, defaultMaterialMemory);
+        if (defaultMaterialSet == VK_NULL_HANDLE) {
+            setError("default material creation failed");
+            return false;
+        }
+        return true;
+    }
+
+    void destroyMaterialResources() noexcept {
+        if (device != VK_NULL_HANDLE) {
+            for (const auto& entry : materialBuffers) {
+                if (entry.second != VK_NULL_HANDLE) vkDestroyBuffer(device, entry.second, nullptr);
+            }
+            for (const auto& entry : materialMemory) {
+                if (entry.second != VK_NULL_HANDLE) vkFreeMemory(device, entry.second, nullptr);
+            }
+            if (defaultMaterialBuffer != VK_NULL_HANDLE) vkDestroyBuffer(device, defaultMaterialBuffer, nullptr);
+            if (defaultMaterialMemory != VK_NULL_HANDLE) vkFreeMemory(device, defaultMaterialMemory, nullptr);
+            if (materialDescriptorPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device, materialDescriptorPool, nullptr);
+            }
+            if (materialDescriptorLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device, materialDescriptorLayout, nullptr);
+            }
+        }
+        materialDescriptorPool = VK_NULL_HANDLE;
+        materialDescriptorLayout = VK_NULL_HANDLE;
+        materialSets.clear();
+        materialBuffers.clear();
+        materialMemory.clear();
+        defaultMaterialSet = VK_NULL_HANDLE;
+        defaultMaterialBuffer = VK_NULL_HANDLE;
+        defaultMaterialMemory = VK_NULL_HANDLE;
+    }
+#endif
+
     bool createDescriptorResources() {
         VkDescriptorSetLayoutBinding binding{};
         binding.binding = 0;
@@ -1670,6 +1851,13 @@ struct Graphics::Impl {
         }
 
         const std::uint32_t uniformSlot = currentFrameSlot % graphics_internal::SceneBindings::kSlots;
+#if defined(APORIA_EXPERIMENTAL)
+        const auto* materialSetsArg = &materialSets;
+        const VkDescriptorSet defaultMaterialArg = defaultMaterialSet;
+#else
+        const std::unordered_map<std::uint64_t, VkDescriptorSet>* materialSetsArg = nullptr;
+        const VkDescriptorSet defaultMaterialArg = VK_NULL_HANDLE;
+#endif
         float sunMatrix[16];
         buildSunMatrix(sunMatrix);
         writeSceneUniforms(uniformSlot, sunMatrix);
@@ -1709,7 +1897,7 @@ struct Graphics::Impl {
             graphics_internal::MeshRenderer::renderMeshes(
                 commandBuffer, meshPipeline, meshPipelineLayout,
                 scene.set(uniformSlot), reflectViewProj,
-                pendingItems, meshes);
+                pendingItems, meshes, VK_NULL_HANDLE, materialSetsArg, defaultMaterialArg);
             vkCmdEndRenderPass(commandBuffer);
         }
 
@@ -1772,7 +1960,7 @@ struct Graphics::Impl {
                 graphics_internal::MeshRenderer::renderMeshes(
                     commandBuffer, meshPipeline, meshPipelineLayout,
                     scene.set(uniformSlot), pendingViewProj,
-                    pendingItems, meshes, mainMeshPipeline);
+                    pendingItems, meshes, mainMeshPipeline, materialSetsArg, defaultMaterialArg);
             }
             vkCmdEndRenderPass(commandBuffer);
         }
@@ -1866,6 +2054,9 @@ struct Graphics::Impl {
                 shadowFragmentShader = VK_NULL_HANDLE;
             }
             scene.destroyLayout(device);
+#if defined(APORIA_EXPERIMENTAL)
+            destroyMaterialResources();
+#endif
             if (tonemapPipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device, tonemapPipeline, nullptr);
                 tonemapPipeline = VK_NULL_HANDLE;
@@ -2221,6 +2412,12 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         shutdown();
         return false;
     }
+#if defined(APORIA_EXPERIMENTAL)
+    if (!impl_->createDefaultMaterial()) {
+        shutdown();
+        return false;
+    }
+#endif
     if (!impl_->createDescriptorResources()) {
         shutdown();
         return false;
@@ -2400,8 +2597,14 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
 
     VkPipelineLayoutCreateInfo meshLayoutInfo{};
     meshLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+#if defined(APORIA_EXPERIMENTAL)
+    VkDescriptorSetLayout meshSetLayouts[2] = {sceneLayout, impl_->materialDescriptorLayout};
+    meshLayoutInfo.setLayoutCount = 2;
+    meshLayoutInfo.pSetLayouts = meshSetLayouts;
+#else
     meshLayoutInfo.setLayoutCount = 1;
     meshLayoutInfo.pSetLayouts = &sceneLayout;
+#endif
     meshLayoutInfo.pushConstantRangeCount = 1;
     meshLayoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(impl_->device, &meshLayoutInfo, nullptr, &impl_->meshPipelineLayout) != VK_SUCCESS) {
@@ -3211,6 +3414,86 @@ bool Graphics::setTexture2D(TextureHandle handle) noexcept {
     }
     return impl_->bindTextureDescriptor(handle);
 }
+
+#if defined(APORIA_EXPERIMENTAL)
+MaterialHandle Graphics::createMaterial(const MaterialDesc& description) {
+    if (!impl_ || !initialized()) {
+        if (impl_) impl_->setError("Graphics is not initialized");
+        return invalidMaterialHandle;
+    }
+    if (!impl_->createMaterialLayout() || !impl_->createMaterialPool()) {
+        return invalidMaterialHandle;
+    }
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    const VkDescriptorSet set = impl_->buildMaterialSet(description, buffer, memory);
+    if (set == VK_NULL_HANDLE) {
+        impl_->setError("material set allocation failed");
+        return invalidMaterialHandle;
+    }
+    const std::uint64_t id = impl_->nextMaterialId++;
+    impl_->materialSets[id] = set;
+    impl_->materialBuffers[id] = buffer;
+    impl_->materialMemory[id] = memory;
+    return MaterialHandle{id};
+}
+
+bool Graphics::updateMaterial(MaterialHandle handle, const MaterialDesc& description) {
+    if (!impl_ || !initialized() || !handle.valid()) {
+        return false;
+    }
+    const auto it = impl_->materialSets.find(handle.value());
+    if (it == impl_->materialSets.end()) {
+        return false;
+    }
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    const VkDescriptorSet set = impl_->buildMaterialSet(description, buffer, memory);
+    if (set == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (impl_->device != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(impl_->device, impl_->materialDescriptorPool, 1, &it->second);
+        if (impl_->materialBuffers[handle.value()] != VK_NULL_HANDLE) {
+            vkDestroyBuffer(impl_->device, impl_->materialBuffers[handle.value()], nullptr);
+        }
+        if (impl_->materialMemory[handle.value()] != VK_NULL_HANDLE) {
+            vkFreeMemory(impl_->device, impl_->materialMemory[handle.value()], nullptr);
+        }
+    }
+    it->second = set;
+    impl_->materialBuffers[handle.value()] = buffer;
+    impl_->materialMemory[handle.value()] = memory;
+    return true;
+}
+
+void Graphics::destroyMaterial(MaterialHandle handle) noexcept {
+    if (!impl_ || !handle.valid()) {
+        return;
+    }
+    const auto it = impl_->materialSets.find(handle.value());
+    if (it == impl_->materialSets.end()) {
+        return;
+    }
+    if (impl_->device != VK_NULL_HANDLE && impl_->materialDescriptorPool != VK_NULL_HANDLE) {
+        VkDescriptorSet set = it->second;
+        vkFreeDescriptorSets(impl_->device, impl_->materialDescriptorPool, 1, &set);
+        if (impl_->materialBuffers[handle.value()] != VK_NULL_HANDLE) {
+            vkDestroyBuffer(impl_->device, impl_->materialBuffers[handle.value()], nullptr);
+        }
+        if (impl_->materialMemory[handle.value()] != VK_NULL_HANDLE) {
+            vkFreeMemory(impl_->device, impl_->materialMemory[handle.value()], nullptr);
+        }
+    }
+    impl_->materialSets.erase(it);
+    impl_->materialBuffers.erase(handle.value());
+    impl_->materialMemory.erase(handle.value());
+}
+
+bool Graphics::materialValid(MaterialHandle handle) const noexcept {
+    return impl_ != nullptr && handle.valid() && impl_->materialSets.count(handle.value()) != 0;
+}
+#endif
 
 void Graphics::destroyTexture2D(TextureHandle handle) noexcept {
     if (!impl_ || !handle.valid()) {

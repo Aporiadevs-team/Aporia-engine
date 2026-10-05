@@ -181,6 +181,53 @@ int main() {
     check(taaPixels.size() == 64u * 64u * 4u, "TAA readback must match the target size");
     game.graphics().destroyMesh(taaBox);
 
+#if defined(APORIA_EXPERIMENTAL)
+    // EXPERIMENTAL multi-layer materials: four diffuse layers + masks bound per
+    // draw item, so a single render() can show several textures at once.
+    {
+        const auto makeSolid = [&](std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+            const std::uint8_t pixels[4] = {r, g, b, 255};
+            Aporia::TextureDesc desc;
+            desc.width = 1;
+            desc.height = 1;
+            desc.format = Aporia::TextureFormat::Rgba8Unorm;
+            desc.pixels = pixels;
+            desc.dataSize = sizeof(pixels);
+            return game.graphics().createTexture2D(desc);
+        };
+        Aporia::TextureHandle layers[4] = {
+            makeSolid(24, 24, 28), makeSolid(230, 230, 230),
+            makeSolid(120, 80, 40), makeSolid(60, 120, 60)};
+        Aporia::TextureHandle masks[2] = {makeSolid(255, 0, 0), makeSolid(0, 0, 0)};
+
+        Aporia::MaterialDesc materialDesc;
+        for (int index = 0; index < 4; ++index) {
+            materialDesc.diffuse[index] = layers[index];
+        }
+        materialDesc.mask[0] = masks[0];
+        materialDesc.mask[1] = masks[1];
+        const Aporia::MaterialHandle material = game.graphics().createMaterial(materialDesc);
+        check(material.valid() && game.graphics().materialValid(material), "exp material must be created");
+
+        const Aporia::MeshHandle expMesh = game.graphics().createMesh(Aporia::apr::makeBoxMesh(0.5f, 0.5f, 0.5f));
+        Aporia::RenderItem expItem;
+        expItem.meshId = expMesh.value();
+        std::memcpy(expItem.modelMatrix, &identity, sizeof(identity));
+        expItem.material = material;
+        check(game.graphics().render(farCamera, {expItem}), "exp material frame must render");
+
+        game.graphics().destroyMaterial(material);
+        check(!game.graphics().materialValid(material), "exp material must be destroyed");
+        game.graphics().destroyMesh(expMesh);
+        for (Aporia::TextureHandle handle : layers) {
+            game.graphics().destroyTexture2D(handle);
+        }
+        for (Aporia::TextureHandle handle : masks) {
+            game.graphics().destroyTexture2D(handle);
+        }
+    }
+#endif
+
     game.shutdownGraphics();
     check(!game.graphics().initialized(), "graphics must report shutdown state");
 

@@ -33,12 +33,21 @@ enum class TextureFormat : std::uint8_t {
     Rgba8Srgb,
 };
 
+// Texture addressing mode. Repeat is the default so tiling UVs (e.g. -57.8)
+// wrap instead of smearing the edge texel.
+enum class SamplerMode : std::uint8_t {
+    Repeat = 0,
+    Clamp = 1,
+    MirroredRepeat = 2,
+};
+
 struct TextureDesc {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     TextureFormat format = TextureFormat::Rgba8Unorm;
     const void* pixels = nullptr;
     std::size_t dataSize = 0;
+    SamplerMode wrap = SamplerMode::Repeat;
 };
 
 class APORIA_API TextureHandle {
@@ -109,6 +118,33 @@ private:
 
 inline constexpr FontHandle invalidFontHandle{};
 
+#if defined(APORIA_EXPERIMENTAL)
+// EXPERIMENTAL multi-layer material: up to four diffuse layers blended by two
+// mask maps (road/terrain splat), bound per draw item so a single render() can
+// use several textures at once. Lives in the exp build until stable.
+class APORIA_API MaterialHandle {
+public:
+    constexpr MaterialHandle() noexcept = default;
+    constexpr explicit MaterialHandle(std::uint64_t value) noexcept : value_(value) {}
+    [[nodiscard]] constexpr std::uint64_t value() const noexcept { return value_; }
+    [[nodiscard]] constexpr bool valid() const noexcept { return value_ != 0; }
+    friend constexpr bool operator==(MaterialHandle, MaterialHandle) noexcept = default;
+private:
+    std::uint64_t value_ = 0;
+};
+
+inline constexpr MaterialHandle invalidMaterialHandle{};
+
+struct MaterialDesc {
+    TextureHandle diffuse[4]{}; // 0 = base (asphalt), 1..3 blend on top
+    TextureHandle mask[2]{};    // mask0.r/g/b select layers 1/2/3, mask1 = detail
+    // Per-layer UV transform (scalar, applied to both axes):
+    //   uv = fragUv * uvScale[i] + uvOffset[i].
+    float uvScale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float uvOffset[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+#endif
+
 // View parameters for one frame. Matrices are column-major float32 in Vulkan
 // clip space (see Mat4::perspectiveVulkan); copy from Mat4 with memcpy.
 struct CameraState {
@@ -130,6 +166,9 @@ struct RenderItem {
     std::uint64_t meshId = 0;
     float modelMatrix[16] = {};
     float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+#if defined(APORIA_EXPERIMENTAL)
+    MaterialHandle material{}; // multi-layer material (see createMaterial)
+#endif
     bool playerShadowCaster = false;
 };
 
@@ -368,6 +407,14 @@ public:
         std::size_t dataSize);
     bool setTexture2D(TextureHandle handle) noexcept;
     void destroyTexture2D(TextureHandle handle) noexcept;
+
+#if defined(APORIA_EXPERIMENTAL)
+    // EXPERIMENTAL multi-layer materials bound per RenderItem.
+    MaterialHandle createMaterial(const MaterialDesc& description);
+    bool updateMaterial(MaterialHandle handle, const MaterialDesc& description);
+    void destroyMaterial(MaterialHandle handle) noexcept;
+    [[nodiscard]] bool materialValid(MaterialHandle handle) const noexcept;
+#endif
 
     MeshHandle createMesh(const MeshData& data);
     void destroyMesh(MeshHandle handle) noexcept;

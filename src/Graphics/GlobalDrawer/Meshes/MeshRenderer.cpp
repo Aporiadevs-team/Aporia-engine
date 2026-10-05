@@ -30,7 +30,9 @@ void MeshRenderer::renderMeshes(
         const float viewProj[16],
         const std::vector<RenderItem>& items,
         const std::unordered_map<std::uint64_t, Resource>& resources,
-        VkPipeline pipelineOverride) noexcept {
+        VkPipeline pipelineOverride,
+        const std::unordered_map<std::uint64_t, VkDescriptorSet>* materialSets,
+        VkDescriptorSet defaultMaterialSet) noexcept {
     PushConstants push{};
     std::memcpy(push.viewProj, viewProj, sizeof(push.viewProj));
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -40,6 +42,21 @@ void MeshRenderer::renderMeshes(
     for (const RenderItem& item : items) {
         const auto it = resources.find(item.meshId);
         if (it == resources.end() || it->second.vertexBuffer == VK_NULL_HANDLE) continue;
+#if defined(APORIA_EXPERIMENTAL)
+        if (materialSets != nullptr) {
+            VkDescriptorSet materialSet = defaultMaterialSet;
+            if (item.material.valid()) {
+                const auto materialIt = materialSets->find(item.material.value());
+                if (materialIt != materialSets->end()) {
+                    materialSet = materialIt->second;
+                }
+            }
+            if (materialSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipelineLayout, 1, 1, &materialSet, 0, nullptr);
+            }
+        }
+#endif
         std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
         std::memcpy(push.color, item.color, sizeof(push.color));
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,

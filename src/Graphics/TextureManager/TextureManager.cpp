@@ -258,13 +258,21 @@ bool TextureManager::createResource(
         return false;
     }
 
+    VkSamplerAddressMode addressMode = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    switch (description.wrap) {
+    case SamplerMode::Clamp: addressMode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE; break;
+    case SamplerMode::MirroredRepeat: addressMode = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT; break;
+    case SamplerMode::Repeat:
+    default: addressMode = VK_SAMPLER_ADDRESS_MODE_REPEAT; break;
+    }
+
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     samplerInfo.magFilter = VK_FILTER_LINEAR;
     samplerInfo.minFilter = VK_FILTER_LINEAR;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeU = addressMode;
+    samplerInfo.addressModeV = addressMode;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.maxLod = 1.0f;
     if (vkCreateSampler(context.device, &samplerInfo, nullptr, &texture.sampler) != VK_SUCCESS) {

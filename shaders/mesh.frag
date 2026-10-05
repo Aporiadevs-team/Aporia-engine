@@ -10,6 +10,22 @@ layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
 layout(set = 0, binding = 1) uniform sampler2D shadowMap;
 layout(set = 0, binding = 2) uniform sampler2D reflectionTexture; // mirror plane texture (screen space)
 
+#if defined(APORIA_EXPERIMENTAL)
+// EXPERIMENTAL multi-layer material (set = 1). Layer 0 is the base; layers 1..3
+// blend in through the mask0 channels.
+layout(set = 1, binding = 0) uniform sampler2D layerDiffuse0;
+layout(set = 1, binding = 1) uniform sampler2D layerDiffuse1;
+layout(set = 1, binding = 2) uniform sampler2D layerDiffuse2;
+layout(set = 1, binding = 3) uniform sampler2D layerDiffuse3;
+layout(set = 1, binding = 4) uniform sampler2D layerMask0;
+layout(set = 1, binding = 5) uniform sampler2D layerMask1;
+// Per-layer UV transform: uv = fragUv * uvScale[i] + uvOffset[i].
+layout(set = 1, binding = 6) uniform LayerParams {
+    vec4 uvScale;
+    vec4 uvOffset;
+} layerParams;
+#endif
+
 layout(set = 0, binding = 3) uniform SceneUniforms {
     mat4 sunViewProj;     // world -> sun clip space
     vec4 sunDirection;    // xyz toward light, w intensity
@@ -119,7 +135,22 @@ vec3 planarReflection(vec3 baseColor, vec3 normal, vec3 viewDirection) {
 }
 
 void main() {
+#if defined(APORIA_EXPERIMENTAL)
+    // Multi-layer splat with per-layer UV transforms: asphalt + line + detail
+    // blended by the mask channels. Masks themselves use the raw UV (lightmap).
+    vec2 uv0 = fragUv * layerParams.uvScale.x + layerParams.uvOffset.x;
+    vec2 uv1 = fragUv * layerParams.uvScale.y + layerParams.uvOffset.y;
+    vec2 uv2 = fragUv * layerParams.uvScale.z + layerParams.uvOffset.z;
+    vec2 uv3 = fragUv * layerParams.uvScale.w + layerParams.uvOffset.w;
+    vec3 albedo = texture(layerDiffuse0, uv0).rgb;
+    vec4 mask = texture(layerMask0, fragUv);
+    albedo = mix(albedo, texture(layerDiffuse1, uv1).rgb, mask.r);
+    albedo = mix(albedo, texture(layerDiffuse2, uv2).rgb, mask.g);
+    albedo = mix(albedo, texture(layerDiffuse3, uv3).rgb, mask.b);
+    albedo *= fragColor.rgb;
+#else
     vec3 albedo = texture(albedoTexture, fragUv).rgb * fragColor.rgb;
+#endif
     float albedoLuminance = dot(albedo, vec3(0.299, 0.587, 0.114));
     albedo = mix(albedo, vec3(albedoLuminance), 0.18);
     vec3 normal = normalize(fragNormal);

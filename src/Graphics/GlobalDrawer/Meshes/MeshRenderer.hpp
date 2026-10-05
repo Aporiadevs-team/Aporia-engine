@@ -33,7 +33,9 @@ public:
         const float viewProj[16],
         const std::vector<RenderItem>& items,
         const std::unordered_map<std::uint64_t, Resource>& resources,
-        VkPipeline pipelineOverride = VK_NULL_HANDLE) noexcept;
+        VkPipeline pipelineOverride = VK_NULL_HANDLE,
+        const std::unordered_map<std::uint64_t, VkDescriptorSet>* materialSets = nullptr,
+        VkDescriptorSet defaultMaterialSet = VK_NULL_HANDLE) noexcept;
 
     static void destroyResource(VkDevice device, Resource& resource) noexcept;
 
