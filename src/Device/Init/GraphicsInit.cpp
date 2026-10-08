@@ -242,6 +242,17 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
             return false;
         }
     }
+    // One secondary command buffer (own pool) per renderer/pass and frame slot.
+    for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {
+        for (std::uint32_t kind = 0; kind < Impl::kSecondaryCount; ++kind) {
+            if (!graphics_internal::Device::createCommandPool(impl_->device, impl_->graphicsFamily, impl_->secondaryPools[slot][kind]) ||
+                !graphics_internal::Device::createSecondaryCommandBuffer(impl_->device, impl_->secondaryPools[slot][kind], impl_->secondaryBuffers[slot][kind])) {
+                impl_->setError("secondary command pool/buffer creation failed");
+                shutdown();
+                return false;
+            }
+        }
+    }
 #if defined(APORIA_EXPERIMENTAL)
     for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {
         if (!graphics_internal::Device::createCommandPool(impl_->device, impl_->graphicsFamily, impl_->shadowCommandPools[slot]) ||
@@ -400,6 +411,15 @@ void Graphics::Impl::destroy() noexcept {
                 renderCommandPools[slot] = VK_NULL_HANDLE;
             }
             renderCommandBuffers[slot] = VK_NULL_HANDLE;
+        }
+        for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {
+            for (std::uint32_t kind = 0; kind < Impl::kSecondaryCount; ++kind) {
+                if (secondaryPools[slot][kind] != VK_NULL_HANDLE) {
+                    vkDestroyCommandPool(device, secondaryPools[slot][kind], nullptr);
+                    secondaryPools[slot][kind] = VK_NULL_HANDLE;
+                }
+                secondaryBuffers[slot][kind] = VK_NULL_HANDLE;
+            }
         }
 #if defined(APORIA_EXPERIMENTAL)
         for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {

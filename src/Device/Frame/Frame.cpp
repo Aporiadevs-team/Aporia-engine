@@ -302,7 +302,8 @@ bool Graphics::multithreadedRender() const noexcept {
 #endif
 
 bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept {
-    VkCommandBuffer cmd = renderCommandBuffers[currentFrameSlot % maxFramesInFlight];
+    const std::uint32_t slotIndex = currentFrameSlot % maxFramesInFlight;
+    VkCommandBuffer cmd = renderCommandBuffers[slotIndex];
     if (cmd == VK_NULL_HANDLE) {
         setError("render command buffer is unavailable");
         return false;
@@ -335,10 +336,8 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     const bool recordShadow = shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty();
 #if defined(APORIA_EXPERIMENTAL)
     shadowRecordedThisFrame = false;
-    VkCommandBuffer shadowCmd = shadowCommandBuffers[currentFrameSlot % maxFramesInFlight];
+    VkCommandBuffer shadowCmd = shadowCommandBuffers[slotIndex];
     if (recordShadow && multithreadedRender && jobs && shadowCmd != VK_NULL_HANDLE) {
-        // Record the shadow pass on a worker while the main thread records the
-        // reflection/main/tonemap passes below. The worker owns its slot pool.
         float shadowSunMatrix[16];
         std::memcpy(shadowSunMatrix, sunMatrix, sizeof(shadowSunMatrix));
         jobs->submit([this, shadowCmd, shadowSunMatrix]() {
@@ -365,8 +364,6 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
 
 #if defined(APORIA_EXPERIMENTAL)
     if (shadowRecordedThisFrame) {
-        // The shadow pass ran in its own command buffer; make its depth writes
-        // visible to the fragment shaders that sample the map below.
         VkImageMemoryBarrier shadowBarrier{};
         shadowBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         shadowBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -387,43 +384,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     }
 #endif
 
-    // Reflection pass: mirrored camera renders the scene into a smaller
-    // target first, so the main pass can sample it.
-    const bool useReflection = reflectionsEnabled && reflectFramebuffer != VK_NULL_HANDLE;
-    if (useReflection && !pendingItems.empty()) {
-        std::array<VkClearValue, 2> reflectClear{};
-        reflectClear[0].color = {{0.02f, 0.03f, 0.05f, 1.0f}};
-        reflectClear[1].depthStencil = {1.0f, 0};
-        VkRenderPassBeginInfo renderPassBegin{};
-        renderPassBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassBegin.renderPass = renderPass;
-        renderPassBegin.framebuffer = reflectFramebuffer;
-        renderPassBegin.renderArea.extent = {reflectWidth, reflectHeight};
-        renderPassBegin.clearValueCount = static_cast<std::uint32_t>(reflectClear.size());
-        renderPassBegin.pClearValues = reflectClear.data();
-        vkCmdBeginRenderPass(cmd, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
-
-        VkViewport reflectViewport{};
-        reflectViewport.width = static_cast<float>(reflectWidth);
-        reflectViewport.height = static_cast<float>(reflectHeight);
-        reflectViewport.maxDepth = 1.0f;
-        vkCmdSetViewport(cmd, 0, 1, &reflectViewport);
-        VkRect2D reflectScissor{};
-        reflectScissor.extent = {reflectWidth, reflectHeight};
-        vkCmdSetScissor(cmd, 0, 1, &reflectScissor);
-
-        const Mat4 mirroredView = reflectViewMatrix();
-        float reflectViewProj[16];
-        Impl::multiplyMat4(pendingProjection, mirroredView.m[0], reflectViewProj);
-        graphics_internal::MeshRenderer::renderMeshes(
-            cmd, pipelines.meshPipeline, pipelines.meshPipelineLayout,
-            scene.set(uniformSlot), reflectViewProj,
-            pendingItems, meshStore.resources(), VK_NULL_HANDLE, materialSetsArg, defaultMaterialArg);
-        vkCmdEndRenderPass(cmd);
-    }
-
-    // Main pass: meshes render into the HDR target at Medium/High, or
-    // straight into the final target at Low.
+    // Main target selection (HDR scene target or the final target at Low).
     VkFramebuffer mainFramebuffer = targetFramebuffer;
     std::uint32_t mainWidth = width;
     std::uint32_t mainHeight = height;
@@ -437,59 +398,163 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         mainRenderPass = hdrRenderPass;
         mainMeshPipeline = pipelines.hdrMeshPipeline;
     }
+    const bool useReflection = reflectionsEnabled && reflectFramebuffer != VK_NULL_HANDLE;
+    const bool drawDebug = drawDebugTriangle && !useHdr;
+
+    // ---- record one secondary command buffer per renderer/pass ----
+    const auto beginSecondary = [](VkCommandBuffer cb, VkRenderPass renderPass, VkFramebuffer framebuffer) -> bool {
+        if (cb == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE || framebuffer == VK_NULL_HANDLE) {
+            return false;
+        }
+        vkResetCommandBuffer(cb, 0);
+        VkCommandBufferInheritanceInfo inheritance{};
+        inheritance.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+        inheritance.renderPass = renderPass;
+        inheritance.framebuffer = framebuffer;
+        inheritance.subpass = 0;
+        VkCommandBufferBeginInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        info.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        info.pInheritanceInfo = &inheritance;
+        return vkBeginCommandBuffer(cb, &info) == VK_SUCCESS;
+    };
+    const auto setViewportScissor = [](VkCommandBuffer cb, std::uint32_t w, std::uint32_t h) {
+        VkViewport viewport{};
+        viewport.width = static_cast<float>(w);
+        viewport.height = static_cast<float>(h);
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(cb, 0, 1, &viewport);
+        VkRect2D scissor{};
+        scissor.extent = {w, h};
+        vkCmdSetScissor(cb, 0, 1, &scissor);
+    };
+
+    VkCommandBuffer reflectMeshCb = secondaryBuffers[slotIndex][kSecondaryReflectMesh];
+    VkCommandBuffer mainMeshCb = secondaryBuffers[slotIndex][kSecondaryMainMesh];
+    VkCommandBuffer uiRectCb = secondaryBuffers[slotIndex][kSecondaryUiRect];
+    VkCommandBuffer uiTextCb = secondaryBuffers[slotIndex][kSecondaryUiText];
+    VkCommandBuffer tonemapCb = secondaryBuffers[slotIndex][kSecondaryTonemap];
+
+    bool haveReflectMesh = false;
+    if (useReflection && !pendingItems.empty() && beginSecondary(reflectMeshCb, renderPass, reflectFramebuffer)) {
+        setViewportScissor(reflectMeshCb, reflectWidth, reflectHeight);
+        const Mat4 mirroredView = reflectViewMatrix();
+        float reflectViewProj[16];
+        Impl::multiplyMat4(pendingProjection, mirroredView.m[0], reflectViewProj);
+        graphics_internal::MeshRenderer::renderMeshes(
+            reflectMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+            scene.set(uniformSlot), reflectViewProj,
+            pendingItems, meshStore.resources(), VK_NULL_HANDLE, materialSetsArg, defaultMaterialArg);
+        vkEndCommandBuffer(reflectMeshCb);
+        haveReflectMesh = true;
+    }
+
+    // Mesh pass secondary (debug triangle + scene meshes live in the same one).
+    bool haveMainMesh = false;
+    if ((!pendingItems.empty() || drawDebug) && beginSecondary(mainMeshCb, mainRenderPass, mainFramebuffer)) {
+        setViewportScissor(mainMeshCb, mainWidth, mainHeight);
+        if (drawDebug) {
+            const VkDescriptorSet debugDescriptor = textureStore.descriptorSet();
+            vkCmdBindPipeline(mainMeshCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.pipeline);
+            vkCmdBindDescriptorSets(mainMeshCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.pipelineLayout,
+                                    0, 1, &debugDescriptor, 0, nullptr);
+            vkCmdDraw(mainMeshCb, 3, 1, 0, 0);
+        }
+        if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
+            graphics_internal::MeshRenderer::renderMeshes(
+                mainMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+                scene.set(uniformSlot), pendingViewProj,
+                pendingItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
+        }
+        vkEndCommandBuffer(mainMeshCb);
+        haveMainMesh = true;
+    }
+
+    bool haveUiRect = false;
+    if (beginSecondary(uiRectCb, renderPass, targetFramebuffer)) {
+        setViewportScissor(uiRectCb, width, height);
+        if (pipelines.uiPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(uiRectCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.uiPipeline);
+        }
+        rectRenderer.draw(uiRectCb, pipelines.tonemapPipelineLayout, width, height, uiDrawList);
+        vkEndCommandBuffer(uiRectCb);
+        haveUiRect = true;
+    }
+    bool haveUiText = false;
+    if (beginSecondary(uiTextCb, renderPass, targetFramebuffer)) {
+        setViewportScissor(uiTextCb, width, height);
+        renderUiText(uiTextCb, width, height);
+        vkEndCommandBuffer(uiTextCb);
+        haveUiText = true;
+    }
+
+    bool haveTonemap = false;
+    if (useHdr && beginSecondary(tonemapCb, renderPass, targetFramebuffer)) {
+        setViewportScissor(tonemapCb, width, height);
+        vkCmdBindPipeline(tonemapCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.tonemapPipeline);
+        vkCmdBindDescriptorSets(tonemapCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.tonemapPipelineLayout,
+                                0, 1, &tonemapDescriptorSet, 0, nullptr);
+        struct TonemapPush {
+            graphics_internal::RectRenderer::PushConstants ui;
+            float aa[4];
+        };
+        TonemapPush push{};
+        push.aa[0] = antiAliasingStrength;
+        push.aa[1] = static_cast<float>(antiAliasing);
+        vkCmdPushConstants(tonemapCb, pipelines.tonemapPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDraw(tonemapCb, 4, 1, 0, 0);
+        vkEndCommandBuffer(tonemapCb);
+        haveTonemap = true;
+    }
+
+    // ---- primary: begin the render passes and execute the secondaries ----
+    if (haveReflectMesh) {
+        std::array<VkClearValue, 2> reflectClear{};
+        reflectClear[0].color = {{0.02f, 0.03f, 0.05f, 1.0f}};
+        reflectClear[1].depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = renderPass;
+        begin.framebuffer = reflectFramebuffer;
+        begin.renderArea.extent = {reflectWidth, reflectHeight};
+        begin.clearValueCount = static_cast<std::uint32_t>(reflectClear.size());
+        begin.pClearValues = reflectClear.data();
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+        vkCmdExecuteCommands(cmd, 1, &reflectMeshCb);
+        vkCmdEndRenderPass(cmd);
+    }
 
     {
         std::array<VkClearValue, 2> clearValues{};
         clearValues[0].color = {{0.02f, 0.03f, 0.05f, 1.0f}};
         clearValues[1].depthStencil = {1.0f, 0};
-        VkRenderPassBeginInfo renderPassBegin{};
-        renderPassBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassBegin.renderPass = mainRenderPass;
-        renderPassBegin.framebuffer = mainFramebuffer;
-        renderPassBegin.renderArea.extent = {mainWidth, mainHeight};
-        renderPassBegin.clearValueCount = static_cast<std::uint32_t>(clearValues.size());
-        renderPassBegin.pClearValues = clearValues.data();
-        vkCmdBeginRenderPass(cmd, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = mainRenderPass;
+        begin.framebuffer = mainFramebuffer;
+        begin.renderArea.extent = {mainWidth, mainHeight};
+        begin.clearValueCount = static_cast<std::uint32_t>(clearValues.size());
+        begin.pClearValues = clearValues.data();
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 
-        VkViewport viewport{};
-        viewport.width = static_cast<float>(mainWidth);
-        viewport.height = static_cast<float>(mainHeight);
-        viewport.minDepth = 0.0f;
-        viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(cmd, 0, 1, &viewport);
-        VkRect2D scissor{};
-        scissor.extent = {mainWidth, mainHeight};
-        vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-        // The debug triangle pipeline targets the non-HDR color format;
-        // skip it when the scene renders through the HDR pass.
-        if (drawDebugTriangle && !useHdr) {
-            const VkDescriptorSet debugDescriptor = textureStore.descriptorSet();
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.pipeline);
-            vkCmdBindDescriptorSets(
-                cmd,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                pipelines.pipelineLayout,
-                0,
-                1,
-                &debugDescriptor,
-                0,
-                nullptr);
-            vkCmdDraw(cmd, 3, 1, 0, 0);
+        VkCommandBuffer mainCommands[3]{};
+        std::uint32_t mainCommandCount = 0;
+        if (haveMainMesh) {
+            mainCommands[mainCommandCount++] = mainMeshCb;
         }
-
-        if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
-            graphics_internal::MeshRenderer::renderMeshes(
-                cmd, pipelines.meshPipeline, pipelines.meshPipelineLayout,
-                scene.set(uniformSlot), pendingViewProj,
-                pendingItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
-        }
-
-        // UI (SDF rects + text) must composite at every quality. Without HDR the
-        // tonemap pass does not run, so draw the overlay straight into the main
-        // pass over the final target.
+        // UI must composite at every quality; without HDR the tonemap pass does
+        // not run, so execute the UI secondaries straight into the main pass.
         if (!useHdr) {
-            recordUiOverlay(cmd, pipelines.tonemapPipelineLayout, mainWidth, mainHeight);
+            if (haveUiRect) {
+                mainCommands[mainCommandCount++] = uiRectCb;
+            }
+            if (haveUiText) {
+                mainCommands[mainCommandCount++] = uiTextCb;
+            }
+        }
+        if (mainCommandCount > 0) {
+            vkCmdExecuteCommands(cmd, mainCommandCount, mainCommands);
         }
         vkCmdEndRenderPass(cmd);
     }
@@ -498,7 +563,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         taa.record(cmd, hdrDepthImage, taaPrevViewProj, taaInvViewProj, antiAliasingStrength);
     }
 
-    if (useHdr) {
+    if (useHdr && haveTonemap) {
         renderTonemap(cmd, targetFramebuffer, width, height);
     }
 

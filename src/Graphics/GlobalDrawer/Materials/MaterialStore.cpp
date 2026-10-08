@@ -193,6 +193,8 @@ bool MaterialStore::update(MaterialHandle handle, const MaterialDesc& descriptio
     }
     const VkDevice device = device_.device;
     if (device != VK_NULL_HANDLE) {
+        // Frames may still be in flight referencing the old descriptor set.
+        vkDeviceWaitIdle(device);
         vkFreeDescriptorSets(device, materialDescriptorPool_, 1, &it->second);
         if (materialBuffers_[handle.value()] != VK_NULL_HANDLE) {
             vkDestroyBuffer(device, materialBuffers_[handle.value()], nullptr);
@@ -214,6 +216,8 @@ void MaterialStore::destroy(MaterialHandle handle) noexcept {
     const auto it = materialSets_.find(handle.value());
     const VkDevice device = device_.device;
     if (device != VK_NULL_HANDLE && materialDescriptorPool_ != VK_NULL_HANDLE) {
+        // Frames may still be in flight referencing this descriptor set.
+        vkDeviceWaitIdle(device);
         VkDescriptorSet set = it->second;
         vkFreeDescriptorSets(device, materialDescriptorPool_, 1, &set);
         if (materialBuffers_[handle.value()] != VK_NULL_HANDLE) {

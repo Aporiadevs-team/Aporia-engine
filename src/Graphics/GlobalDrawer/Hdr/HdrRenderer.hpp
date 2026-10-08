@@ -3,7 +3,6 @@
 #include "Aporia/Graphics/Graphics.hpp"
 
 #include <cstdint>
-#include <functional>
 #include <vulkan/vulkan.h>
 
 namespace Aporia::graphics_internal {
@@ -24,14 +23,16 @@ public:
         std::int32_t antiAliasingMode = 0;
     };
 
-    // Fullscreen tonemap pass from the HDR target into the final target. The
-    // overlay callback lets the caller draw UI inside the same render pass.
+    // Final composite pass into `target`. The caller passes the already-recorded
+    // secondary command buffers (tonemap fullscreen + UI) that are executed
+    // inside the pass; nothing is drawn inline.
     static void renderTonemap(
         const TonemapContext& context,
         VkFramebuffer target,
         std::uint32_t width,
         std::uint32_t height,
-        const std::function<void(VkCommandBuffer, VkPipelineLayout)>& overlay) noexcept;
+        const VkCommandBuffer* commands,
+        std::uint32_t commandCount) noexcept;
 
     void setQuality(GraphicsQuality quality) noexcept { quality_ = quality; }
     void setAntiAliasing(AntiAliasingMode mode) noexcept { antiAliasing_ = mode; }

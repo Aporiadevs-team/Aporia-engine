@@ -89,6 +89,17 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     // command buffer through vkQueueWaitIdle.
     VkCommandPool renderCommandPools[graphics_internal::Device::MaxFramesInFlight] = {};
     VkCommandBuffer renderCommandBuffers[graphics_internal::Device::MaxFramesInFlight] = {};
+    // Secondary command buffers, one per renderer/pass and frame slot. Each is
+    // recorded with RENDER_PASS_CONTINUE and executed by the primary, so every
+    // renderer owns its own command buffer.
+    static constexpr std::uint32_t kSecondaryReflectMesh = 0;
+    static constexpr std::uint32_t kSecondaryMainMesh = 1;
+    static constexpr std::uint32_t kSecondaryUiRect = 2;
+    static constexpr std::uint32_t kSecondaryUiText = 3;
+    static constexpr std::uint32_t kSecondaryTonemap = 4;
+    static constexpr std::uint32_t kSecondaryCount = 5;
+    VkCommandPool secondaryPools[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
+    VkCommandBuffer secondaryBuffers[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
     VkImage colorImage = VK_NULL_HANDLE;
     VkDeviceMemory colorMemory = VK_NULL_HANDLE;
     VkImageView colorView = VK_NULL_HANDLE;
@@ -275,9 +286,6 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     void renderShadowMap(VkCommandBuffer buffer, const float sunMatrix[16]);
     void renderUiText(VkCommandBuffer buffer, std::uint32_t width, std::uint32_t height);
     void renderTonemap(VkCommandBuffer cmd, VkFramebuffer target, std::uint32_t width, std::uint32_t height);
-    // Binds the UI pipeline and records the SDF rects + text overlay. Used both
-    // by the HDR tonemap pass and directly over the final target at Low quality.
-    void recordUiOverlay(VkCommandBuffer cmd, VkPipelineLayout layout, std::uint32_t width, std::uint32_t height);
     bool renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept;
     void destroy() noexcept;
 };
