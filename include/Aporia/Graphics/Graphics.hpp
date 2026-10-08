@@ -414,6 +414,11 @@ public:
     bool updateMaterial(MaterialHandle handle, const MaterialDesc& description);
     void destroyMaterial(MaterialHandle handle) noexcept;
     [[nodiscard]] bool materialValid(MaterialHandle handle) const noexcept;
+
+    // EXPERIMENTAL renderer threading. When enabled the shadow pass is recorded
+    // on a worker thread in parallel with the main frame recording. Default on.
+    void setMultithreadedRender(bool enabled) noexcept;
+    [[nodiscard]] bool multithreadedRender() const noexcept;
 #endif
 
     MeshHandle createMesh(const MeshData& data);

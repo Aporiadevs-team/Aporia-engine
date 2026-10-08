@@ -124,6 +124,7 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     VkCommandPool shadowCommandPool = VK_NULL_HANDLE;
     VkCommandBuffer shadowCommandBuffer = VK_NULL_HANDLE;
     bool shadowRecordedThisFrame = false;
+    bool multithreadedRender = true;
 #endif
     std::uint32_t shadowMapSize = 0;
     Aporia::ShadowConfig shadowConfig{};

@@ -285,6 +285,18 @@ bool Graphics::vsync() const noexcept {
     return impl_ != nullptr && impl_->deviceService.vsync;
 }
 
+#if defined(APORIA_EXPERIMENTAL)
+void Graphics::setMultithreadedRender(bool enabled) noexcept {
+    if (impl_) {
+        impl_->multithreadedRender = enabled;
+    }
+}
+
+bool Graphics::multithreadedRender() const noexcept {
+    return impl_ != nullptr && impl_->multithreadedRender;
+}
+#endif
+
 bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept {
     if (vkResetCommandBuffer(commandBuffer, 0) != VK_SUCCESS) {
         setError("vkResetCommandBuffer failed");
@@ -314,7 +326,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     const bool recordShadow = shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty();
 #if defined(APORIA_EXPERIMENTAL)
     shadowRecordedThisFrame = false;
-    if (recordShadow && jobs && shadowCommandBuffer != VK_NULL_HANDLE) {
+    if (recordShadow && multithreadedRender && jobs && shadowCommandBuffer != VK_NULL_HANDLE) {
         // Record the shadow pass on a worker while the main thread records the
         // reflection/main/tonemap passes below. Both command buffers come from
         // the same pool but are reset/begun on their own thread.

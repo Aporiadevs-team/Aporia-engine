@@ -25,6 +25,9 @@ Textures live in `src/Graphics/TextureManager/` (`TextureManager`,
 
 `Device/Threading/JobSystem` (experimental) is the main-thread owned worker pool
 backing the multithreaded renderer; per-pass command buffers build on top of it.
+The shadow pass records into its own command buffer/pool on a worker while the
+main thread records the rest of the frame. Toggle it at runtime with
+`Graphics::setMultithreadedRender`; benchmark with `AporiaGraphicsMtTest`.
 
 `Graphics.cpp` is a thin assembler (construction, lifecycle queries and the
 camera/render entry points); `GraphicsImpl.hpp` declares the private
