@@ -4,9 +4,7 @@
 
 namespace Aporia::graphics_internal {
 
-namespace {
-
-bool findMemoryType(
+bool MemoryManager::findMemoryType(
         const VkPhysicalDeviceMemoryProperties& properties,
         std::uint32_t typeFilter,
         VkMemoryPropertyFlags required,
@@ -22,8 +20,6 @@ bool findMemoryType(
     }
     return false;
 }
-
-} // namespace
 
 bool MemoryManager::uploadBuffer(
         const Context& context,

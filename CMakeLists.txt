@@ -69,27 +69,49 @@ if(APORIA_ENABLE_GRAPHICS)
     list(APPEND APORIA_SOURCES
         src/Graphics/GlobalDrawer/MeshPrimitives.cpp
         src/Graphics/GlobalDrawer/Support/Support.cpp
+        src/Graphics/GlobalDrawer/Support/Stats.cpp
         src/Device/Device.cpp
         src/Device/MemoryManager/MemoryManager.cpp
         src/Device/SceneManager/Color/ColorTarget.cpp
         src/Device/SceneManager/Depth/DepthTarget.cpp
         src/Device/SceneManager/HeadlessTarget/HeadlessTarget.cpp
+        src/Device/SceneManager/QualityTargets/QualityTargets.cpp
         src/Device/SceneManager/SceneBindings/SceneBindings.cpp
         src/Device/Init/RenderPass.cpp
+        src/Device/Init/GraphicsInit.cpp
+        src/Device/Pipeline/PipelineFactory.cpp
+        src/Device/Readback/Readback.cpp
         src/Device/Swapchain/Swapchain.cpp
+        src/Device/Frame/Frame.cpp
+        src/Graphics/GlobalDrawer/Materials/MaterialStore.cpp
+        src/Graphics/GlobalDrawer/Materials/Materials.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
+        src/Graphics/GlobalDrawer/Meshes/MeshStore.cpp
+        src/Graphics/GlobalDrawer/Meshes/Meshes.cpp
+        src/Graphics/GlobalDrawer/LOD/LOD.cpp
+        src/Graphics/GlobalDrawer/Quality/Quality.cpp
+        src/Graphics/GlobalDrawer/Smooth/Smooth.cpp
+        src/Graphics/GlobalDrawer/Smooth/TAA/TaaRenderer.cpp
         src/Graphics/GlobalDrawer/Rectangulars/RectRenderer.cpp
+        src/Graphics/GlobalDrawer/Rectangulars/Ui.cpp
         src/Graphics/GlobalDrawer/Shadows/ShadowRenderer.cpp
+        src/Graphics/GlobalDrawer/Shadows/Shadows.cpp
         src/Graphics/GlobalDrawer/Hdr/HdrRenderer.cpp
-        src/Graphics/GlobalDrawer/Hdr/TaaRenderer.cpp
+        src/Graphics/GlobalDrawer/Hdr/Hdr.cpp
         src/Graphics/GlobalDrawer/Text/TextRenderer.cpp
+        src/Graphics/GlobalDrawer/Text/Text.cpp
         src/Graphics/GlobalDrawer/Text/FontAtlasBuilder.cpp
-        src/Graphics/TextureManager/TextureManager.cpp)
+        src/Graphics/GlobalDrawer/Text/FontStore.cpp
+        src/Graphics/GlobalDrawer/Text/Fonts.cpp
+        src/Graphics/TextureManager/TextureManager.cpp
+        src/Graphics/TextureManager/TextureStore.cpp
+        src/Graphics/TextureManager/TextureHandles.cpp)
 endif()
 
 if(APORIA_ENABLE_GRAPHICS)
     find_package(Vulkan REQUIRED)
-    list(APPEND APORIA_SOURCES src/Graphics/GlobalDrawer/Graphics.cpp)
+    list(APPEND APORIA_SOURCES
+        src/Graphics/GlobalDrawer/Graphics.cpp)
 
     set(APORIA_VULKAN_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders")
     set(APORIA_VULKAN_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/triangle.vert.spv")

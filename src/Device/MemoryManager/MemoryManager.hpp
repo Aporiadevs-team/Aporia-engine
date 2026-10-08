@@ -35,6 +35,13 @@ public:
 
     // Frees a buffer/memory pair (safe on null handles).
     static void destroyBuffer(VkDevice device, VkBuffer& buffer, VkDeviceMemory& memory) noexcept;
+
+    // Picks the first memory type satisfying `typeFilter` and `required`.
+    [[nodiscard]] static bool findMemoryType(
+        const VkPhysicalDeviceMemoryProperties& properties,
+        std::uint32_t typeFilter,
+        VkMemoryPropertyFlags required,
+        std::uint32_t& outType) noexcept;
 };
 
 } // namespace Aporia::graphics_internal

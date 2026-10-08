@@ -2,20 +2,24 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdarg>
+#include <cstdio>
 #include <fstream>
 
 namespace Aporia::graphics_internal {
 
-QualityParameters qualityParameters(Aporia::GraphicsQuality quality) noexcept {
-    switch (quality) {
-    case Aporia::GraphicsQuality::Low:
-        return {512, 1, false, false, 0.0f, 0.22f, 50};
-    case Aporia::GraphicsQuality::Medium:
-        return {1024, 9, true, true, 0.5f, 0.16f, 75};
-    case Aporia::GraphicsQuality::High:
-    default:
-        return {4096, 49, true, true, 1.0f, 0.10f, 100};
+void engineLog(const char* format, ...) {
+    FILE* logFile = nullptr;
+    if (fopen_s(&logFile, "aporia_engine.log", "a") != 0 || logFile == nullptr) {
+        return;
     }
+    va_list arguments;
+    va_start(arguments, format);
+    std::vfprintf(logFile, format, arguments);
+    va_end(arguments);
+    std::fputc('\n', logFile);
+    std::fflush(logFile);
+    std::fclose(logFile);
 }
 
 VkFormat chooseColorFormat(VkPhysicalDevice physicalDevice, VkFormat& format) {
