@@ -81,8 +81,14 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t graphicsFamily = 0;
+    // Utility command buffer for one-shot uploads/readback (internally waited).
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    // Per-frame-slot render command pools/buffers: each in-flight frame owns
+    // its own recording resources, so frames no longer serialize on a shared
+    // command buffer through vkQueueWaitIdle.
+    VkCommandPool renderCommandPools[graphics_internal::Device::MaxFramesInFlight] = {};
+    VkCommandBuffer renderCommandBuffers[graphics_internal::Device::MaxFramesInFlight] = {};
     VkImage colorImage = VK_NULL_HANDLE;
     VkDeviceMemory colorMemory = VK_NULL_HANDLE;
     VkImageView colorView = VK_NULL_HANDLE;
@@ -118,11 +124,11 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     graphics_internal::MaterialStore materialStore;
     // EXPERIMENTAL worker pool used by the frame recorder.
     std::unique_ptr<graphics_internal::JobSystem> jobs;
-    // EXPERIMENTAL separate command pool + buffer for the shadow pass, recorded
-    // on a worker thread. A dedicated pool keeps the Vulkan external
+    // EXPERIMENTAL per-slot command pool + buffer for the shadow pass, recorded
+    // on a worker thread. A dedicated pool per slot keeps the Vulkan external
     // synchronization rule (one pool, one recording thread) intact.
-    VkCommandPool shadowCommandPool = VK_NULL_HANDLE;
-    VkCommandBuffer shadowCommandBuffer = VK_NULL_HANDLE;
+    VkCommandPool shadowCommandPools[graphics_internal::Device::MaxFramesInFlight] = {};
+    VkCommandBuffer shadowCommandBuffers[graphics_internal::Device::MaxFramesInFlight] = {};
     bool shadowRecordedThisFrame = false;
     bool multithreadedRender = true;
 #endif
@@ -268,7 +274,10 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     bool recreateSwapchain() noexcept;
     void renderShadowMap(VkCommandBuffer buffer, const float sunMatrix[16]);
     void renderUiText(VkCommandBuffer buffer, std::uint32_t width, std::uint32_t height);
-    void renderTonemap(VkFramebuffer target, std::uint32_t width, std::uint32_t height);
+    void renderTonemap(VkCommandBuffer cmd, VkFramebuffer target, std::uint32_t width, std::uint32_t height);
+    // Binds the UI pipeline and records the SDF rects + text overlay. Used both
+    // by the HDR tonemap pass and directly over the final target at Low quality.
+    void recordUiOverlay(VkCommandBuffer cmd, VkPipelineLayout layout, std::uint32_t width, std::uint32_t height);
     bool renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept;
     void destroy() noexcept;
 };

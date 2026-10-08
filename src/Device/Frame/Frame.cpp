@@ -98,33 +98,43 @@ bool Graphics::renderHeadlessFrame() noexcept {
         impl_->lastError = "Headless frame requested for a native graphics context";
         return false;
     }
-    if (!impl_->renderFrameCommands(impl_->framebuffer, impl_->renderWidth, impl_->renderHeight)) {
 
+    // Keep up to MaxFramesInFlight frames in flight: wait only this slot's
+    // fence instead of draining the whole queue every frame.
+    const std::uint32_t frameSlot = impl_->currentFrameSlot;
+    if (vkWaitForFences(impl_->device, 1, &impl_->frameSync.fences[frameSlot], VK_TRUE,
+                        std::numeric_limits<std::uint64_t>::max()) != VK_SUCCESS) {
+        impl_->lastError = "vkWaitForFences failed";
+        return false;
+    }
+    if (!impl_->renderFrameCommands(impl_->framebuffer, impl_->renderWidth, impl_->renderHeight)) {
         return false;
     }
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     VkCommandBuffer frameBuffers[2]{};
     std::uint32_t frameBufferCount = 0;
 #if defined(APORIA_EXPERIMENTAL)
-    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffer != VK_NULL_HANDLE) {
-        frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffer;
+    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffers[frameSlot] != VK_NULL_HANDLE) {
+        frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffers[frameSlot];
     }
 #endif
-    frameBuffers[frameBufferCount++] = impl_->commandBuffer;
-    submitInfo.commandBufferCount = frameBufferCount;
-    submitInfo.pCommandBuffers = frameBuffers;
-    if (vkQueueSubmit(impl_->queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
-        impl_->lastError = "vkQueueSubmit failed";
+    frameBuffers[frameBufferCount++] = impl_->renderCommandBuffers[frameSlot];
+
+    if (vkResetFences(impl_->device, 1, &impl_->frameSync.fences[frameSlot]) != VK_SUCCESS) {
+        impl_->lastError = "vkResetFences failed";
         return false;
     }
-    if (vkQueueWaitIdle(impl_->queue) != VK_SUCCESS) {
-        impl_->lastError = "vkQueueWaitIdle failed";
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = frameBufferCount;
+    submitInfo.pCommandBuffers = frameBuffers;
+    if (vkQueueSubmit(impl_->queue, 1, &submitInfo, impl_->frameSync.fences[frameSlot]) != VK_SUCCESS) {
+        impl_->lastError = "vkQueueSubmit failed";
         return false;
     }
 
     ++impl_->frameCount;
+    impl_->currentFrameSlot = (frameSlot + 1) % Impl::maxFramesInFlight;
     return true;
 }
 
@@ -170,13 +180,7 @@ bool Graphics::renderNativeFrame() noexcept {
         impl_->lastError = "vkWaitForFences failed";
         return false;
     }
-    // The renderer currently records all passes into one primary command
-    // buffer, so a frame slot fence alone cannot protect it when two slots
-    // overlap. Serialize reuse until command buffers are allocated per slot.
-    if (vkQueueWaitIdle(impl_->queue) != VK_SUCCESS) {
-        impl_->lastError = "vkQueueWaitIdle before command buffer reuse failed";
-        return false;
-    }
+    // Per-slot command buffers mean the slot fence is enough: no queue drain.
 
     std::uint32_t imageIndex = 0;
     VkResult acquireResult = VK_ERROR_OUT_OF_DATE_KHR;
@@ -228,11 +232,11 @@ bool Graphics::renderNativeFrame() noexcept {
     VkCommandBuffer frameBuffers[2]{};
     std::uint32_t frameBufferCount = 0;
 #if defined(APORIA_EXPERIMENTAL)
-    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffer != VK_NULL_HANDLE) {
-        frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffer;
+    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffers[frameSlot] != VK_NULL_HANDLE) {
+        frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffers[frameSlot];
     }
 #endif
-    frameBuffers[frameBufferCount++] = impl_->commandBuffer;
+    frameBuffers[frameBufferCount++] = impl_->renderCommandBuffers[frameSlot];
     submitInfo.commandBufferCount = frameBufferCount;
     submitInfo.pCommandBuffers = frameBuffers;
     submitInfo.signalSemaphoreCount = 1;
@@ -298,7 +302,12 @@ bool Graphics::multithreadedRender() const noexcept {
 #endif
 
 bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept {
-    if (vkResetCommandBuffer(commandBuffer, 0) != VK_SUCCESS) {
+    VkCommandBuffer cmd = renderCommandBuffers[currentFrameSlot % maxFramesInFlight];
+    if (cmd == VK_NULL_HANDLE) {
+        setError("render command buffer is unavailable");
+        return false;
+    }
+    if (vkResetCommandBuffer(cmd, 0) != VK_SUCCESS) {
         setError("vkResetCommandBuffer failed");
         return false;
     }
@@ -306,7 +315,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     VkCommandBufferBeginInfo commandBeginInfo{};
     commandBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     commandBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(commandBuffer, &commandBeginInfo) != VK_SUCCESS) {
+    if (vkBeginCommandBuffer(cmd, &commandBeginInfo) != VK_SUCCESS) {
         setError("vkBeginCommandBuffer failed");
         return false;
     }
@@ -326,31 +335,31 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     const bool recordShadow = shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty();
 #if defined(APORIA_EXPERIMENTAL)
     shadowRecordedThisFrame = false;
-    if (recordShadow && multithreadedRender && jobs && shadowCommandBuffer != VK_NULL_HANDLE) {
+    VkCommandBuffer shadowCmd = shadowCommandBuffers[currentFrameSlot % maxFramesInFlight];
+    if (recordShadow && multithreadedRender && jobs && shadowCmd != VK_NULL_HANDLE) {
         // Record the shadow pass on a worker while the main thread records the
-        // reflection/main/tonemap passes below. Both command buffers come from
-        // the same pool but are reset/begun on their own thread.
+        // reflection/main/tonemap passes below. The worker owns its slot pool.
         float shadowSunMatrix[16];
         std::memcpy(shadowSunMatrix, sunMatrix, sizeof(shadowSunMatrix));
-        jobs->submit([this, shadowSunMatrix]() {
-            vkResetCommandBuffer(shadowCommandBuffer, 0);
+        jobs->submit([this, shadowCmd, shadowSunMatrix]() {
+            vkResetCommandBuffer(shadowCmd, 0);
             VkCommandBufferBeginInfo info{};
             info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            if (vkBeginCommandBuffer(shadowCommandBuffer, &info) == VK_SUCCESS) {
-                renderShadowMap(shadowCommandBuffer, shadowSunMatrix);
-                vkEndCommandBuffer(shadowCommandBuffer);
+            if (vkBeginCommandBuffer(shadowCmd, &info) == VK_SUCCESS) {
+                renderShadowMap(shadowCmd, shadowSunMatrix);
+                vkEndCommandBuffer(shadowCmd);
             } else {
                 shadowRecordedThisFrame = false;
             }
         });
         shadowRecordedThisFrame = true;
     } else if (recordShadow) {
-        renderShadowMap(commandBuffer, sunMatrix);
+        renderShadowMap(cmd, sunMatrix);
     }
 #else
     if (recordShadow) {
-        renderShadowMap(commandBuffer, sunMatrix);
+        renderShadowMap(cmd, sunMatrix);
     }
 #endif
 
@@ -371,7 +380,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         shadowBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         shadowBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(
-            commandBuffer,
+            cmd,
             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             0, 0, nullptr, 0, nullptr, 1, &shadowBarrier);
@@ -392,25 +401,25 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         renderPassBegin.renderArea.extent = {reflectWidth, reflectHeight};
         renderPassBegin.clearValueCount = static_cast<std::uint32_t>(reflectClear.size());
         renderPassBegin.pClearValues = reflectClear.data();
-        vkCmdBeginRenderPass(commandBuffer, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(cmd, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
 
         VkViewport reflectViewport{};
         reflectViewport.width = static_cast<float>(reflectWidth);
         reflectViewport.height = static_cast<float>(reflectHeight);
         reflectViewport.maxDepth = 1.0f;
-        vkCmdSetViewport(commandBuffer, 0, 1, &reflectViewport);
+        vkCmdSetViewport(cmd, 0, 1, &reflectViewport);
         VkRect2D reflectScissor{};
         reflectScissor.extent = {reflectWidth, reflectHeight};
-        vkCmdSetScissor(commandBuffer, 0, 1, &reflectScissor);
+        vkCmdSetScissor(cmd, 0, 1, &reflectScissor);
 
         const Mat4 mirroredView = reflectViewMatrix();
         float reflectViewProj[16];
         Impl::multiplyMat4(pendingProjection, mirroredView.m[0], reflectViewProj);
         graphics_internal::MeshRenderer::renderMeshes(
-            commandBuffer, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+            cmd, pipelines.meshPipeline, pipelines.meshPipelineLayout,
             scene.set(uniformSlot), reflectViewProj,
             pendingItems, meshStore.resources(), VK_NULL_HANDLE, materialSetsArg, defaultMaterialArg);
-        vkCmdEndRenderPass(commandBuffer);
+        vkCmdEndRenderPass(cmd);
     }
 
     // Main pass: meshes render into the HDR target at Medium/High, or
@@ -440,25 +449,25 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         renderPassBegin.renderArea.extent = {mainWidth, mainHeight};
         renderPassBegin.clearValueCount = static_cast<std::uint32_t>(clearValues.size());
         renderPassBegin.pClearValues = clearValues.data();
-        vkCmdBeginRenderPass(commandBuffer, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(cmd, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
 
         VkViewport viewport{};
         viewport.width = static_cast<float>(mainWidth);
         viewport.height = static_cast<float>(mainHeight);
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
         VkRect2D scissor{};
         scissor.extent = {mainWidth, mainHeight};
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
 
         // The debug triangle pipeline targets the non-HDR color format;
         // skip it when the scene renders through the HDR pass.
         if (drawDebugTriangle && !useHdr) {
             const VkDescriptorSet debugDescriptor = textureStore.descriptorSet();
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.pipeline);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.pipeline);
             vkCmdBindDescriptorSets(
-                commandBuffer,
+                cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipelines.pipelineLayout,
                 0,
@@ -466,27 +475,34 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
                 &debugDescriptor,
                 0,
                 nullptr);
-            vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
         }
 
         if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
             graphics_internal::MeshRenderer::renderMeshes(
-                commandBuffer, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+                cmd, pipelines.meshPipeline, pipelines.meshPipelineLayout,
                 scene.set(uniformSlot), pendingViewProj,
                 pendingItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
         }
-        vkCmdEndRenderPass(commandBuffer);
+
+        // UI (SDF rects + text) must composite at every quality. Without HDR the
+        // tonemap pass does not run, so draw the overlay straight into the main
+        // pass over the final target.
+        if (!useHdr) {
+            recordUiOverlay(cmd, pipelines.tonemapPipelineLayout, mainWidth, mainHeight);
+        }
+        vkCmdEndRenderPass(cmd);
     }
 
     if (useHdr && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA && taa.valid()) {
-        taa.record(commandBuffer, hdrDepthImage, taaPrevViewProj, taaInvViewProj, antiAliasingStrength);
+        taa.record(cmd, hdrDepthImage, taaPrevViewProj, taaInvViewProj, antiAliasingStrength);
     }
 
     if (useHdr) {
-        renderTonemap(targetFramebuffer, width, height);
+        renderTonemap(cmd, targetFramebuffer, width, height);
     }
 
-    if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         setError("vkEndCommandBuffer failed");
         return false;
     }

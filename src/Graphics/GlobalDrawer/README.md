@@ -28,6 +28,8 @@ backing the multithreaded renderer; per-pass command buffers build on top of it.
 The shadow pass records into its own command buffer/pool on a worker while the
 main thread records the rest of the frame. Toggle it at runtime with
 `Graphics::setMultithreadedRender`; benchmark with `AporiaGraphicsMtTest`.
+Frames also use per-slot render command pools/buffers and fences (no
+`vkQueueWaitIdle` per frame), so multiple frames stay in flight.
 
 `Graphics.cpp` is a thin assembler (construction, lifecycle queries and the
 camera/render entry points); `GraphicsImpl.hpp` declares the private

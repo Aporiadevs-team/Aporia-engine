@@ -2,9 +2,17 @@
 
 namespace Aporia {
 
-void Graphics::Impl::renderTonemap(VkFramebuffer target, std::uint32_t width, std::uint32_t height) {
+void Graphics::Impl::recordUiOverlay(VkCommandBuffer cmd, VkPipelineLayout layout, std::uint32_t width, std::uint32_t height) {
+    if (pipelines.uiPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.uiPipeline);
+    }
+    rectRenderer.draw(cmd, layout, width, height, uiDrawList);
+    renderUiText(cmd, width, height);
+}
+
+void Graphics::Impl::renderTonemap(VkCommandBuffer cmd, VkFramebuffer target, std::uint32_t width, std::uint32_t height) {
     graphics_internal::HdrRenderer::TonemapContext context;
-    context.commandBuffer = commandBuffer;
+    context.commandBuffer = cmd;
     context.renderPass = renderPass;
     context.pipeline = pipelines.tonemapPipeline;
     context.uiPipeline = pipelines.uiPipeline;
@@ -15,8 +23,7 @@ void Graphics::Impl::renderTonemap(VkFramebuffer target, std::uint32_t width, st
     graphics_internal::HdrRenderer::renderTonemap(
         context, target, width, height,
         [this, width, height](VkCommandBuffer buffer, VkPipelineLayout layout) {
-            rectRenderer.draw(buffer, layout, width, height, uiDrawList);
-            renderUiText(buffer, width, height);
+            recordUiOverlay(buffer, layout, width, height);
         });
 }
 

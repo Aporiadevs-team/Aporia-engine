@@ -48,11 +48,34 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->antiAliasing = static_cast<std::uint32_t>(config.antiAliasing);
     impl_->antiAliasingStrength = std::clamp(config.antiAliasingStrength, 0.0f, 1.0f);
     impl_->blurConfig = config.blur;
-    impl_->shadowConfig = config.shadows;
-    impl_->shadowConfig.mapSize = std::max(1u, config.shadows.mapSize);
-    impl_->shadowConfig.cascadeCount = std::max(1u, config.shadows.cascadeCount);
-    impl_->shadowConfig.passCount = std::max(1u, config.shadows.passCount);
-    impl_->shadowConfig.pcfRadius = std::min(8u, config.shadows.pcfRadius);
+    // The quality preset above already produced shadowConfig. Only an explicit
+    // GraphicsConfig.shadows override may replace it; the default value must not
+    // clobber the preset (otherwise High's 4096 map never applies).
+    const Aporia::ShadowConfig defaultShadows{};
+    const Aporia::ShadowConfig& requested = config.shadows;
+    const bool customShadows =
+        requested.enabled != defaultShadows.enabled ||
+        requested.mapSize != defaultShadows.mapSize ||
+        requested.cascadeCount != defaultShadows.cascadeCount ||
+        requested.passCount != defaultShadows.passCount ||
+        requested.pcfRadius != defaultShadows.pcfRadius ||
+        requested.bias != defaultShadows.bias ||
+        requested.normalBias != defaultShadows.normalBias ||
+        requested.strength != defaultShadows.strength ||
+        requested.distance != defaultShadows.distance ||
+        requested.filter != defaultShadows.filter ||
+        requested.blockerSamples != defaultShadows.blockerSamples ||
+        requested.filterSamples != defaultShadows.filterSamples ||
+        requested.contactShadows != defaultShadows.contactShadows ||
+        requested.contactDistance != defaultShadows.contactDistance ||
+        requested.cascadeSplitLambda != defaultShadows.cascadeSplitLambda;
+    if (customShadows) {
+        impl_->shadowConfig = requested;
+        impl_->shadowConfig.mapSize = std::max(1u, requested.mapSize);
+        impl_->shadowConfig.cascadeCount = std::max(1u, requested.cascadeCount);
+        impl_->shadowConfig.passCount = std::max(1u, requested.passCount);
+        impl_->shadowConfig.pcfRadius = std::min(8u, requested.pcfRadius);
+    }
     impl_->playerUltraShadows = config.playerUltraShadows;
     impl_->shadowMapSize = impl_->shadowConfig.mapSize;
     impl_->shadowTaps = static_cast<int>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
@@ -209,12 +232,24 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         shutdown();
         return false;
     }
+    // Per-frame-slot render command pools/buffers so in-flight frames no longer
+    // share one command buffer (and therefore no longer serialize).
+    for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {
+        if (!graphics_internal::Device::createCommandPool(impl_->device, impl_->graphicsFamily, impl_->renderCommandPools[slot]) ||
+            !graphics_internal::Device::createCommandBuffer(impl_->device, impl_->renderCommandPools[slot], impl_->renderCommandBuffers[slot])) {
+            impl_->setError("render command pool/buffer creation failed");
+            shutdown();
+            return false;
+        }
+    }
 #if defined(APORIA_EXPERIMENTAL)
-    if (!graphics_internal::Device::createCommandPool(impl_->device, impl_->graphicsFamily, impl_->shadowCommandPool) ||
-        !graphics_internal::Device::createCommandBuffer(impl_->device, impl_->shadowCommandPool, impl_->shadowCommandBuffer)) {
-        impl_->setError("shadow command pool/buffer creation failed");
-        shutdown();
-        return false;
+    for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {
+        if (!graphics_internal::Device::createCommandPool(impl_->device, impl_->graphicsFamily, impl_->shadowCommandPools[slot]) ||
+            !graphics_internal::Device::createCommandBuffer(impl_->device, impl_->shadowCommandPools[slot], impl_->shadowCommandBuffers[slot])) {
+            impl_->setError("shadow command pool/buffer creation failed");
+            shutdown();
+            return false;
+        }
     }
 #endif
     const graphics_internal::MeshStore::Device meshDevice{
@@ -229,12 +264,12 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
 #endif
 
 
-    if (!impl_->headless) {
-        if (!graphics_internal::Device::createFrameSync(impl_->device, impl_->frameSync)) {
-            impl_->setError("vkCreateSemaphore/vkCreateFence failed");
-            shutdown();
-            return false;
-        }
+    // Frame synchronization is needed for both paths now: headless uses fences
+    // to keep frames in flight instead of serializing on vkQueueWaitIdle.
+    if (!graphics_internal::Device::createFrameSync(impl_->device, impl_->frameSync)) {
+        impl_->setError("vkCreateSemaphore/vkCreateFence failed");
+        shutdown();
+        return false;
     }
 
 
@@ -359,12 +394,21 @@ void Graphics::Impl::destroy() noexcept {
             vkDestroyRenderPass(device, hdrRenderPass, nullptr);
             hdrRenderPass = VK_NULL_HANDLE;
         }
-#if defined(APORIA_EXPERIMENTAL)
-        if (shadowCommandPool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(device, shadowCommandPool, nullptr);
-            shadowCommandPool = VK_NULL_HANDLE;
+        for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {
+            if (renderCommandPools[slot] != VK_NULL_HANDLE) {
+                vkDestroyCommandPool(device, renderCommandPools[slot], nullptr);
+                renderCommandPools[slot] = VK_NULL_HANDLE;
+            }
+            renderCommandBuffers[slot] = VK_NULL_HANDLE;
         }
-        shadowCommandBuffer = VK_NULL_HANDLE;
+#if defined(APORIA_EXPERIMENTAL)
+        for (std::uint32_t slot = 0; slot < graphics_internal::Device::MaxFramesInFlight; ++slot) {
+            if (shadowCommandPools[slot] != VK_NULL_HANDLE) {
+                vkDestroyCommandPool(device, shadowCommandPools[slot], nullptr);
+                shadowCommandPools[slot] = VK_NULL_HANDLE;
+            }
+            shadowCommandBuffers[slot] = VK_NULL_HANDLE;
+        }
 #endif
         if (commandPool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(device, commandPool, nullptr);

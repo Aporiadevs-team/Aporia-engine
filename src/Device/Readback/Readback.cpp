@@ -14,6 +14,11 @@ bool readbackColorImage(const ReadbackContext& context, std::vector<std::uint8_t
         return false;
     }
 
+    // Frames may still be in flight writing the color image; drain first.
+    if (vkQueueWaitIdle(context.queue) != VK_SUCCESS) {
+        return false;
+    }
+
     const VkDeviceSize byteCount =
         static_cast<VkDeviceSize>(context.width) * static_cast<VkDeviceSize>(context.height) * 4;
 

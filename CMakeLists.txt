@@ -343,6 +343,7 @@ if (APORIA_BUILD_RENDER_TESTS)
     add_subdirectory(tests/graphics/8 aporia-render-test-8)
     add_subdirectory(tests/graphics/9 aporia-render-test-9)
     add_subdirectory(tests/graphics/10 aporia-render-test-10)
+    add_subdirectory(tests/graphics/11 aporia-render-test-11)
 endif()
 
 if(APORIA_BUILD_VISIBLE_RENDER_TESTS)
