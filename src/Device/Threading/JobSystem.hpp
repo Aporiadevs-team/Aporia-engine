@@ -8,9 +8,9 @@
 
 namespace Aporia::graphics_internal {
 
-// EXPERIMENTAL worker pool owned by the main thread. Step 1 of the
-// multithreaded renderer: the main thread can dispatch parallel work before
-// per-pass command buffers land.
+// EXPERIMENTAL worker pool owned by the main thread. The main thread can
+// dispatch work that runs concurrently with its own recording, which is the
+// basis of the multithreaded renderer.
 class JobSystem {
 public:
     // threadCount == 0 -> hardware_concurrency() - 1 (min 1) workers.
@@ -23,12 +23,14 @@ public:
     [[nodiscard]] std::uint32_t threadCount() const noexcept;
     [[nodiscard]] bool valid() const noexcept;
 
-    // Runs fn(index) for every index in [0, count) on the pool. The calling
-    // thread participates and blocks until every index completed.
-    void parallelFor(std::uint32_t count, const std::function<void(std::uint32_t)>& fn);
+    // Queues a task and returns immediately.
+    void submit(std::function<void()> task);
 
-    // Blocks until the queue is drained (no-op for an empty pool).
-    void waitIdle();
+    // Blocks until every submitted task has finished.
+    void waitAll();
+
+    // Runs fn(index) for every index in [0, count) on the pool and blocks.
+    void parallelFor(std::uint32_t count, const std::function<void(std::uint32_t)>& fn);
 
 private:
     struct State;

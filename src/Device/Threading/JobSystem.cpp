@@ -2,11 +2,11 @@
 
 #if defined(APORIA_EXPERIMENTAL)
 
-#include <algorithm>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace Aporia::graphics_internal {
@@ -17,7 +17,7 @@ struct JobSystem::State {
     std::mutex mutex;
     std::condition_variable work;
     std::condition_variable idle;
-    std::uint32_t remaining = 0;
+    std::uint32_t pending = 0;
     bool stopping = false;
 };
 
@@ -73,6 +73,33 @@ bool JobSystem::valid() const noexcept {
     return state_ && !state_->workers.empty();
 }
 
+void JobSystem::submit(std::function<void()> task) {
+    if (!state_) {
+        task();
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        ++state_->pending;
+        state_->tasks.push([state = state_.get(), task = std::move(task)]() mutable {
+            task();
+            std::lock_guard<std::mutex> done(state->mutex);
+            if (--state->pending == 0) {
+                state->idle.notify_all();
+            }
+        });
+    }
+    state_->work.notify_one();
+}
+
+void JobSystem::waitAll() {
+    if (!state_) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    state_->idle.wait(lock, [this]() { return state_->pending == 0 && state_->tasks.empty(); });
+}
+
 void JobSystem::parallelFor(std::uint32_t count, const std::function<void(std::uint32_t)>& fn) {
     if (count == 0) {
         return;
@@ -83,50 +110,10 @@ void JobSystem::parallelFor(std::uint32_t count, const std::function<void(std::u
         }
         return;
     }
-
-    {
-        std::lock_guard<std::mutex> lock(state_->mutex);
-        state_->remaining = count;
-        for (std::uint32_t index = 0; index < count; ++index) {
-            state_->tasks.push([state = state_.get(), &fn, index]() {
-                fn(index);
-                std::lock_guard<std::mutex> done(state->mutex);
-                if (--state->remaining == 0) {
-                    state->idle.notify_all();
-                }
-            });
-        }
+    for (std::uint32_t index = 0; index < count; ++index) {
+        submit([&fn, index]() { fn(index); });
     }
-    state_->work.notify_all();
-
-    // The submitting thread also drains work so it is never idle while tasks
-    // are pending; it returns only once every index has been executed.
-    for (;;) {
-        std::function<void()> task;
-        {
-            std::unique_lock<std::mutex> lock(state_->mutex);
-            if (state_->remaining == 0) {
-                return;
-            }
-            if (state_->tasks.empty()) {
-                state_->idle.wait(lock, [this]() { return state_->remaining == 0 || !state_->tasks.empty(); });
-                if (state_->remaining == 0) {
-                    return;
-                }
-            }
-            task = std::move(state_->tasks.front());
-            state_->tasks.pop();
-        }
-        task();
-    }
-}
-
-void JobSystem::waitIdle() {
-    if (!state_) {
-        return;
-    }
-    std::unique_lock<std::mutex> lock(state_->mutex);
-    state_->idle.wait(lock, [this]() { return state_->remaining == 0 && state_->tasks.empty(); });
+    waitAll();
 }
 
 } // namespace Aporia::graphics_internal

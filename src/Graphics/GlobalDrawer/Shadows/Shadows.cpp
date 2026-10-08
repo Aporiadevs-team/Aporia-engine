@@ -2,12 +2,9 @@
 
 namespace Aporia {
 
-void Graphics::Impl::renderShadowMap() {
-    float sunMatrix[16];
-    buildSunMatrix(sunMatrix);
-
+void Graphics::Impl::renderShadowMap(VkCommandBuffer buffer, const float sunMatrix[16]) {
     graphics_internal::ShadowRenderer::RenderContext context;
-    context.commandBuffer = commandBuffer;
+    context.commandBuffer = buffer;
     context.renderPass = shadow.renderPass;
     context.framebuffer = shadow.framebuffer;
     context.mapSize = shadowMapSize;

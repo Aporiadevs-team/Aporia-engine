@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 
 // Frame-level diagnostics: set APORIA_GRAPHICS_DEBUG=1 to trace acquire/extent/present.
@@ -104,8 +105,16 @@ bool Graphics::renderHeadlessFrame() noexcept {
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &impl_->commandBuffer;
+    VkCommandBuffer frameBuffers[2]{};
+    std::uint32_t frameBufferCount = 0;
+#if defined(APORIA_EXPERIMENTAL)
+    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffer != VK_NULL_HANDLE) {
+        frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffer;
+    }
+#endif
+    frameBuffers[frameBufferCount++] = impl_->commandBuffer;
+    submitInfo.commandBufferCount = frameBufferCount;
+    submitInfo.pCommandBuffers = frameBuffers;
     if (vkQueueSubmit(impl_->queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
         impl_->lastError = "vkQueueSubmit failed";
         return false;
@@ -216,8 +225,16 @@ bool Graphics::renderNativeFrame() noexcept {
     submitInfo.waitSemaphoreCount = 1;
     submitInfo.pWaitSemaphores = &impl_->frameSync.acquire[frameSlot];
     submitInfo.pWaitDstStageMask = &waitStage;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &impl_->commandBuffer;
+    VkCommandBuffer frameBuffers[2]{};
+    std::uint32_t frameBufferCount = 0;
+#if defined(APORIA_EXPERIMENTAL)
+    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffer != VK_NULL_HANDLE) {
+        frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffer;
+    }
+#endif
+    frameBuffers[frameBufferCount++] = impl_->commandBuffer;
+    submitInfo.commandBufferCount = frameBufferCount;
+    submitInfo.pCommandBuffers = frameBuffers;
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &impl_->frameSync.renderFinished[frameSlot];
     if (vkQueueSubmit(impl_->queue, 1, &submitInfo, impl_->frameSync.fences[frameSlot]) != VK_SUCCESS) {
@@ -294,9 +311,60 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     buildSunMatrix(sunMatrix);
     writeSceneUniforms(uniformSlot, sunMatrix);
 
-    if (shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
-        renderShadowMap();
+    const bool recordShadow = shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty();
+#if defined(APORIA_EXPERIMENTAL)
+    shadowRecordedThisFrame = false;
+    if (recordShadow && jobs && shadowCommandBuffer != VK_NULL_HANDLE) {
+        // Record the shadow pass on a worker while the main thread records the
+        // reflection/main/tonemap passes below. Both command buffers come from
+        // the same pool but are reset/begun on their own thread.
+        float shadowSunMatrix[16];
+        std::memcpy(shadowSunMatrix, sunMatrix, sizeof(shadowSunMatrix));
+        jobs->submit([this, shadowSunMatrix]() {
+            vkResetCommandBuffer(shadowCommandBuffer, 0);
+            VkCommandBufferBeginInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            if (vkBeginCommandBuffer(shadowCommandBuffer, &info) == VK_SUCCESS) {
+                renderShadowMap(shadowCommandBuffer, shadowSunMatrix);
+                vkEndCommandBuffer(shadowCommandBuffer);
+            } else {
+                shadowRecordedThisFrame = false;
+            }
+        });
+        shadowRecordedThisFrame = true;
+    } else if (recordShadow) {
+        renderShadowMap(commandBuffer, sunMatrix);
     }
+#else
+    if (recordShadow) {
+        renderShadowMap(commandBuffer, sunMatrix);
+    }
+#endif
+
+#if defined(APORIA_EXPERIMENTAL)
+    if (shadowRecordedThisFrame) {
+        // The shadow pass ran in its own command buffer; make its depth writes
+        // visible to the fragment shaders that sample the map below.
+        VkImageMemoryBarrier shadowBarrier{};
+        shadowBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        shadowBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        shadowBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        shadowBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        shadowBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        shadowBarrier.image = shadow.image;
+        shadowBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        shadowBarrier.subresourceRange.levelCount = 1;
+        shadowBarrier.subresourceRange.layerCount = 1;
+        shadowBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        shadowBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &shadowBarrier);
+    }
+#endif
 
     // Reflection pass: mirrored camera renders the scene into a smaller
     // target first, so the main pass can sample it.
@@ -410,6 +478,11 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         setError("vkEndCommandBuffer failed");
         return false;
     }
+#if defined(APORIA_EXPERIMENTAL)
+    if (jobs) {
+        jobs->waitAll();
+    }
+#endif
     return true;
 }
 

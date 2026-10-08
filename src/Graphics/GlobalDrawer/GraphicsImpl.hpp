@@ -118,6 +118,12 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     graphics_internal::MaterialStore materialStore;
     // EXPERIMENTAL worker pool used by the frame recorder.
     std::unique_ptr<graphics_internal::JobSystem> jobs;
+    // EXPERIMENTAL separate command pool + buffer for the shadow pass, recorded
+    // on a worker thread. A dedicated pool keeps the Vulkan external
+    // synchronization rule (one pool, one recording thread) intact.
+    VkCommandPool shadowCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer shadowCommandBuffer = VK_NULL_HANDLE;
+    bool shadowRecordedThisFrame = false;
 #endif
     std::uint32_t shadowMapSize = 0;
     Aporia::ShadowConfig shadowConfig{};
@@ -259,7 +265,7 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     void destroySwapchainResources() noexcept;
     bool createSwapchainResources();
     bool recreateSwapchain() noexcept;
-    void renderShadowMap();
+    void renderShadowMap(VkCommandBuffer buffer, const float sunMatrix[16]);
     void renderUiText(VkCommandBuffer buffer, std::uint32_t width, std::uint32_t height);
     void renderTonemap(VkFramebuffer target, std::uint32_t width, std::uint32_t height);
     bool renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept;

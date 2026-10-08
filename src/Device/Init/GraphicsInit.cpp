@@ -209,6 +209,14 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         shutdown();
         return false;
     }
+#if defined(APORIA_EXPERIMENTAL)
+    if (!graphics_internal::Device::createCommandPool(impl_->device, impl_->graphicsFamily, impl_->shadowCommandPool) ||
+        !graphics_internal::Device::createCommandBuffer(impl_->device, impl_->shadowCommandPool, impl_->shadowCommandBuffer)) {
+        impl_->setError("shadow command pool/buffer creation failed");
+        shutdown();
+        return false;
+    }
+#endif
     const graphics_internal::MeshStore::Device meshDevice{
         impl_->device, impl_->memoryProperties, impl_->commandBuffer, impl_->queue};
     impl_->meshStore.setDevice(meshDevice);
@@ -351,6 +359,13 @@ void Graphics::Impl::destroy() noexcept {
             vkDestroyRenderPass(device, hdrRenderPass, nullptr);
             hdrRenderPass = VK_NULL_HANDLE;
         }
+#if defined(APORIA_EXPERIMENTAL)
+        if (shadowCommandPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device, shadowCommandPool, nullptr);
+            shadowCommandPool = VK_NULL_HANDLE;
+        }
+        shadowCommandBuffer = VK_NULL_HANDLE;
+#endif
         if (commandPool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(device, commandPool, nullptr);
             commandPool = VK_NULL_HANDLE;
