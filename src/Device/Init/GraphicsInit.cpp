@@ -152,6 +152,10 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     // command buffer exists; it only needs the device/format here.
     impl_->QualityTargets::setDevice({impl_->device, impl_->physicalDevice, impl_->memoryProperties,
                                       VK_NULL_HANDLE, VK_NULL_HANDLE});
+#if defined(APORIA_EXPERIMENTAL)
+    impl_->jobs = std::make_unique<graphics_internal::JobSystem>(0);
+    engineLog("worker pool: %u threads", impl_->jobs->threadCount());
+#endif
 
     if (!impl_->headless) {
         impl_->createSwapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR>(
@@ -315,6 +319,9 @@ void Graphics::shutdown() noexcept {
 }
 
 void Graphics::Impl::destroy() noexcept {
+#if defined(APORIA_EXPERIMENTAL)
+    jobs.reset();
+#endif
     if (device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device);
     }

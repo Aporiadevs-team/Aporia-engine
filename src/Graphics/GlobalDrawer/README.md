@@ -20,8 +20,11 @@ domain package:
 Textures live in `src/Graphics/TextureManager/` (`TextureManager`,
 `TextureStore`, texture handle facade). Device/render management lives in
 `src/Device/` next to the swapchain: `Device/Init/` (bring-up), `Device/Frame/`
-(frame acquire/submit/present and resizes), `Device/Pipeline/`, `Device/Readback/`
-and `Device/SceneManager/`.
+(frame acquire/submit/present and resizes), `Device/Pipeline/`, `Device/Readback/`,
+`Device/Threading/` and `Device/SceneManager/`.
+
+`Device/Threading/JobSystem` (experimental) is the main-thread owned worker pool
+backing the multithreaded renderer; per-pass command buffers build on top of it.
 
 `Graphics.cpp` is a thin assembler (construction, lifecycle queries and the
 camera/render entry points); `GraphicsImpl.hpp` declares the private

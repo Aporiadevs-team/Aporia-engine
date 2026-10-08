@@ -83,6 +83,7 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Device/Readback/Readback.cpp
         src/Device/Swapchain/Swapchain.cpp
         src/Device/Frame/Frame.cpp
+        src/Device/Threading/JobSystem.cpp
         src/Graphics/GlobalDrawer/Materials/MaterialStore.cpp
         src/Graphics/GlobalDrawer/Materials/Materials.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp

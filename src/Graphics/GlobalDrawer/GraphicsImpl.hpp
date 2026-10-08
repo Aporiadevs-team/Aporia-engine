@@ -19,6 +19,7 @@
 #include "Device/SceneManager/QualityTargets/QualityTargets.hpp"
 #include "Device/SceneManager/SceneBindings/SceneBindings.hpp"
 #include "Device/Swapchain/Swapchain.hpp"
+#include "Device/Threading/JobSystem.hpp"
 #include "Graphics/GlobalDrawer/Text/FontStore.hpp"
 #include "Graphics/GlobalDrawer/Hdr/HdrRenderer.hpp"
 #include "Graphics/GlobalDrawer/Materials/MaterialStore.hpp"
@@ -39,6 +40,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -114,6 +116,8 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
 #if defined(APORIA_EXPERIMENTAL)
     // EXPERIMENTAL per-item multi-layer materials (set = 1).
     graphics_internal::MaterialStore materialStore;
+    // EXPERIMENTAL worker pool used by the frame recorder.
+    std::unique_ptr<graphics_internal::JobSystem> jobs;
 #endif
     std::uint32_t shadowMapSize = 0;
     Aporia::ShadowConfig shadowConfig{};
