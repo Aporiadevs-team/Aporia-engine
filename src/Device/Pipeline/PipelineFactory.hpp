@@ -27,6 +27,9 @@ struct PipelineSet {
     VkPipelineLayout meshPipelineLayout = VK_NULL_HANDLE;
     VkPipeline meshPipeline = VK_NULL_HANDLE;
     VkPipeline hdrMeshPipeline = VK_NULL_HANDLE;
+    // Alpha-blended, depth-write-off variants of the mesh pipelines (glass).
+    VkPipeline meshTransparentPipeline = VK_NULL_HANDLE;
+    VkPipeline hdrMeshTransparentPipeline = VK_NULL_HANDLE;
 
     // Shadow depth pass.
     VkShaderModule shadowVertexShader = VK_NULL_HANDLE;
@@ -60,6 +63,7 @@ struct PipelineContext {
     std::string shaderDirectory;
     bool reflectionsEnabled = false;
     std::int32_t shadowTaps = 9;
+    std::int32_t maxLights = 16;
 };
 
 // Creates the shader modules, descriptor layouts/pools and pipelines. On

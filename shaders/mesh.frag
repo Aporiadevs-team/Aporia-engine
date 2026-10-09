@@ -5,6 +5,7 @@
 // Low/Medium/High: PCF taps and reflection toggle compile per preset.
 layout(constant_id = 0) const int SHADOW_TAPS = 9;   // 1 Low, 9 Medium (3x3), 49 High (7x7)
 layout(constant_id = 1) const float REFLECTIONS_ON = 1.0;
+layout(constant_id = 2) const int LIGHTS_MAX = 16;   // 0 Low, 8 Medium, 16 High
 
 layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
 layout(set = 0, binding = 1) uniform sampler2D shadowMap;
@@ -33,6 +34,14 @@ layout(set = 0, binding = 3) uniform SceneUniforms {
     vec4 shadingParams;   // x ambient, y shadow strength, z mirror z, w shadow map texel size
     vec4 screenParams;    // x,y viewport size, z,y unused
     vec4 shadowParams;    // filter, blocker samples, filter samples, contact distance
+    vec4 lightInfo;       // x = active light count
+    // Dynamic lights (structure of arrays). Per light: position.xyz + type,
+    // direction.xyz (toward light), color.rgb + intensity, params =
+    // (radius, softness, innerCos, outerCos).
+    vec4 lightPosition[16];
+    vec4 lightDirection[16];
+    vec4 lightColor[16];
+    vec4 lightParams[16];
 } scene;
 
 layout(location = 0) in vec3 fragNormal;
@@ -142,14 +151,18 @@ void main() {
     vec2 uv1 = fragUv * layerParams.uvScale.y + layerParams.uvOffset.y;
     vec2 uv2 = fragUv * layerParams.uvScale.z + layerParams.uvOffset.z;
     vec2 uv3 = fragUv * layerParams.uvScale.w + layerParams.uvOffset.w;
-    vec3 albedo = texture(layerDiffuse0, uv0).rgb;
+    vec4 base = texture(layerDiffuse0, uv0);
+    vec3 albedo = base.rgb;
+    float texAlpha = base.a;
     vec4 mask = texture(layerMask0, fragUv);
     albedo = mix(albedo, texture(layerDiffuse1, uv1).rgb, mask.r);
     albedo = mix(albedo, texture(layerDiffuse2, uv2).rgb, mask.g);
     albedo = mix(albedo, texture(layerDiffuse3, uv3).rgb, mask.b);
     albedo *= fragColor.rgb;
 #else
-    vec3 albedo = texture(albedoTexture, fragUv).rgb * fragColor.rgb;
+    vec4 albedoSample = texture(albedoTexture, fragUv);
+    vec3 albedo = albedoSample.rgb * fragColor.rgb;
+    float texAlpha = albedoSample.a;
 #endif
     float albedoLuminance = dot(albedo, vec3(0.299, 0.587, 0.114));
     albedo = mix(albedo, vec3(albedoLuminance), 0.18);
@@ -161,8 +174,40 @@ void main() {
     vec3 sunlight = vec3(1.0, 0.96, 0.86) * diffuse * shadow * scene.sunDirection.w;
     vec3 lit = albedo * (skyAmbient * scene.shadingParams.x + sunlight);
 
+    // Dynamic lights: point/spot with a soft radial falloff ("рыхлость"),
+    // directional without attenuation. LIGHTS_MAX is a specialization constant,
+    // so Low compiles the loop (and its cost) away.
+    const int lightCount = int(scene.lightInfo.x);
+    for (int i = 0; i < LIGHTS_MAX; ++i) {
+        if (i >= lightCount) {
+            break;
+        }
+        vec4 lp = scene.lightPosition[i];
+        vec4 ldir = scene.lightDirection[i];
+        vec4 lcol = scene.lightColor[i];
+        vec4 lprm = scene.lightParams[i];
+        vec3 L;
+        float atten = 1.0;
+        if (lp.w < 0.5) {
+            L = normalize(ldir.xyz); // directional
+        } else {
+            vec3 toLight = lp.xyz - fragWorldPosition;
+            float dist = length(toLight);
+            L = toLight / max(dist, 1e-4);
+            float t = clamp(1.0 - dist / max(lprm.x, 1e-4), 0.0, 1.0);
+            atten = t * t * (3.0 - 2.0 * t);
+            atten = pow(atten, max(lprm.y, 0.01));
+            if (lp.w > 1.5) {
+                float cosAngle = dot(normalize(-L), normalize(ldir.xyz));
+                atten *= smoothstep(lprm.w, lprm.z, cosAngle);
+            }
+        }
+        float ndl = max(dot(normal, L), 0.0);
+        lit += albedo * lcol.rgb * lcol.w * ndl * atten;
+    }
+
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - fragWorldPosition);
     lit = planarReflection(lit, normal, viewDirection);
 
-    outColor = vec4(lit, fragColor.a); // linear HDR; tonemap pass converts to display
+    outColor = vec4(lit, fragColor.a * texAlpha); // linear HDR; tonemap pass converts to display
 }

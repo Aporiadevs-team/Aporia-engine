@@ -338,11 +338,22 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     pipelineContext.shaderDirectory = shaderDirectory;
     pipelineContext.reflectionsEnabled = impl_->reflectionsEnabled;
     pipelineContext.shadowTaps = impl_->shadowTaps;
+    pipelineContext.maxLights = static_cast<std::int32_t>(impl_->maxLights);
     std::string pipelineError;
     if (!graphics_internal::createPipelines(pipelineContext, impl_->pipelines, pipelineError)) {
         impl_->setError(pipelineError);
         shutdown();
         return false;
+    }
+
+    {
+        std::string skyError;
+        if (!impl_->sky.initialize(impl_->device, impl_->memoryProperties, impl_->renderPass,
+                                   impl_->hdrRenderPass, shaderDirectory, skyError)) {
+            impl_->setError(skyError);
+            shutdown();
+            return false;
+        }
     }
 
     if (!impl_->rebuildQualityTargets()) {
@@ -392,6 +403,7 @@ void Graphics::Impl::destroy() noexcept {
         destroyDepthResources();
         destroySwapchainResources();
         graphics_internal::destroyPipelines(device, pipelines);
+        sky.shutdown(device);
         taa.shutdown();
         scene.destroyLayout(device);
 #if defined(APORIA_EXPERIMENTAL)

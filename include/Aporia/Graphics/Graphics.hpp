@@ -158,7 +158,30 @@ struct CameraState {
 struct EnvironmentState {
     float sunDirection[3] = {0.35f, -0.5f, 0.8f}; // points toward the light
     float sunIntensity = 1.0f;
+    float ambient = 0.32f; // sky ambient floor (lower for night scenes)
     float mirrorZ = 0.0f; // planar reflection plane height (m); mirrors reflect across z=mirrorZ
+};
+
+enum class LightType : std::uint8_t {
+    Directional = 0,
+    Point = 1,
+    Spot = 2,
+};
+
+// One light source submitted per frame next to the camera/environment. The sun
+// stays in EnvironmentState (it owns the shadow map); these are the dynamic
+// lights: `radius` is the soft falloff distance and `softness` the falloff
+// exponent (higher = tighter core, softer edge).
+struct LightDesc {
+    LightType type = LightType::Point;
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float direction[3] = {0.0f, 0.0f, -1.0f}; // toward the light (directional/spot)
+    float color[3] = {1.0f, 1.0f, 1.0f};
+    float intensity = 1.0f;
+    float radius = 12.0f;
+    float softness = 2.0f;
+    float innerAngle = 0.5f; // spot cone, radians
+    float outerAngle = 0.7f; // spot cone, radians
 };
 
 // One drawable object for a frame.
@@ -170,6 +193,10 @@ struct RenderItem {
     MaterialHandle material{}; // multi-layer material (see createMaterial)
 #endif
     bool playerShadowCaster = false;
+    // Alpha-blended with depth writes disabled (glass, decals): the fragment
+    // alpha comes from the material's base layer, so it composites over the
+    // already-drawn opaque geometry.
+    bool transparent = false;
 };
 
 enum class ShadowFilter : std::uint8_t {
@@ -395,6 +422,34 @@ public:
     // rectangles and text runs, so no GDI/OS drawing is involved.
     void setUiDrawList(UiDrawList drawList);
     void clearUiDrawList() noexcept;
+
+    // Dynamic lights for the next frames. The active quality preset caps how
+    // many actually reach the shader (Low: 0, Medium: 8, High: 16).
+    void setLights(const std::vector<LightDesc>& lights);
+    void clearLights() noexcept;
+    [[nodiscard]] std::size_t lightCount() const noexcept;
+
+    // Time-of-day clock (0..24h). Drives sunsets once the sky consumes it.
+    void setTimeOfDay(double hours) noexcept;
+    [[nodiscard]] double timeOfDay() const noexcept;
+    // Take the local OS clock, second-accurate (Windows); or real UTC + offset.
+    void syncTimeWithComputer() noexcept;
+    void syncTimeWithHours(int utcOffsetHours, int minutes = 0, int seconds = 0) noexcept;
+    // Reality -> game clock: a full day lasts `realMinutesPerDay` real minutes,
+    // `speed`x faster. Default 1440 / 1 = real time.
+    void setGameClock(float realMinutesPerDay, float speed = 1.0f) noexcept;
+    [[nodiscard]] float gameClockScale() const noexcept;
+    // When on, the sun (sky + lighting + shadows) follows the time-of-day clock,
+    // giving real sunrises/sunsets. Off by default (sun comes from EnvironmentState).
+    void setTimeDrivenSun(bool enabled) noexcept;
+    [[nodiscard]] bool timeDrivenSun() const noexcept;
+    // Calendar date; the season drives sunrise/sunset when the sun is time-driven.
+    void setDate(int month, int day) noexcept;
+    [[nodiscard]] double sunriseHour() const noexcept;
+    [[nodiscard]] double sunsetHour() const noexcept;
+    // Manual day-length trim in hours (negative shortens the day).
+    void setDayLengthBias(double hours) noexcept;
+    [[nodiscard]] double dayLengthBias() const noexcept;
 
     // Copies the last rendered headless color target into host memory (RGBA8,
     // renderWidth * renderHeight * 4 bytes). Native targets are not readable.

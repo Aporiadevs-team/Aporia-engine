@@ -18,6 +18,7 @@
 #include "Device/Init/RenderPass.hpp"
 #include "Device/SceneManager/QualityTargets/QualityTargets.hpp"
 #include "Device/SceneManager/SceneBindings/SceneBindings.hpp"
+#include "Device/SceneManager/TimeManager/TimeManager.hpp"
 #include "Device/Swapchain/Swapchain.hpp"
 #include "Device/Threading/JobSystem.hpp"
 #include "Graphics/GlobalDrawer/Text/FontStore.hpp"
@@ -27,6 +28,8 @@
 #include "Graphics/GlobalDrawer/Meshes/MeshStore.hpp"
 #include "Graphics/GlobalDrawer/Rectangulars/RectRenderer.hpp"
 #include "Graphics/GlobalDrawer/Shadows/ShadowRenderer.hpp"
+#include "Graphics/GlobalDrawer/Light/LightStore.hpp"
+#include "Graphics/GlobalDrawer/Sky/SkyRenderer.hpp"
 #include "Graphics/GlobalDrawer/Support/Support.hpp"
 #include "Graphics/GlobalDrawer/Text/TextRenderer.hpp"
 #include "Graphics/TextureManager/TextureStore.hpp"
@@ -97,7 +100,8 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     static constexpr std::uint32_t kSecondaryUiRect = 2;
     static constexpr std::uint32_t kSecondaryUiText = 3;
     static constexpr std::uint32_t kSecondaryTonemap = 4;
-    static constexpr std::uint32_t kSecondaryCount = 5;
+    static constexpr std::uint32_t kSecondarySky = 5;
+    static constexpr std::uint32_t kSecondaryCount = 6;
     VkCommandPool secondaryPools[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
     VkCommandBuffer secondaryBuffers[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
     VkImage colorImage = VK_NULL_HANDLE;
@@ -130,6 +134,14 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     // Quality pass resources. One scene uniform buffer + descriptor set per
     // frame-in-flight slot; shadow/reflection maps are stable shared images.
     graphics_internal::SceneBindings scene;
+    // Dynamic lights, packed into the scene uniform buffer each frame.
+    graphics_internal::LightStore lightStore;
+    std::uint32_t maxLights = 16;
+    // Procedural infinite sky drawn as the scene background.
+    graphics_internal::SkyRenderer sky;
+    // Time-of-day clock (drives sunsets in the sky once wired up).
+    graphics_internal::TimeManager timeManager;
+    bool timeDrivenSun = false;
 #if defined(APORIA_EXPERIMENTAL)
     // EXPERIMENTAL per-item multi-layer materials (set = 1).
     graphics_internal::MaterialStore materialStore;
@@ -187,6 +199,7 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
         float color[4];
     };
 
+    static constexpr std::uint32_t kMaxLights = graphics_internal::LightStore::kMaxLights;
     struct SceneUniforms {
         float sunViewProj[16];
         float sunDirection[4];
@@ -194,8 +207,14 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
         float shadingParams[4];
         float screenParams[4];
         float shadowParams[4];
+        float lightInfo[4]; // x = active light count
+        float lightPosition[kMaxLights][4];
+        float lightDirection[kMaxLights][4];
+        float lightColor[kMaxLights][4];
+        float lightParams[kMaxLights][4];
     };
-    static_assert(sizeof(SceneUniforms) == 144, "SceneUniforms must stay one 144-byte block");
+    static_assert(sizeof(SceneUniforms) == 144 + 16 + 4 * 16 * 16,
+                  "SceneUniforms layout must match shaders/mesh.frag");
 
     CameraState pendingCamera{};
     float pendingViewProj[16]{};

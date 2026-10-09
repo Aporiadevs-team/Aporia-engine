@@ -79,7 +79,7 @@ public:
 
     void setMode(Mode mode) noexcept { mode_ = mode; }
     [[nodiscard]] Mode mode() const noexcept { return mode_; }
-    void setAtlasTexture(const AtlasTexture& texture) noexcept;
+    void setAtlasTexture(const AtlasTexture& texture, std::uint32_t frameSlot) noexcept;
 
     // Lays out text into glyph instances. Handles '\n'; size is in pixels.
     [[nodiscard]] std::vector<TextGlyph> layoutText(
@@ -123,8 +123,6 @@ private:
         void* mapped = nullptr;
         std::uint64_t uploadedSignature = 0;
     };
-
-    void updateDescriptors() noexcept;
 
     VkDevice device_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptorLayout_ = VK_NULL_HANDLE;

@@ -35,7 +35,7 @@ void Graphics::Impl::renderUiText(VkCommandBuffer buffer, std::uint32_t width, s
     textRenderer.setMode(atlasDesc->mode == UiTextAtlasMode::TtfBitmap
         ? graphics_internal::TextRenderer::Mode::Ttf
         : graphics_internal::TextRenderer::Mode::Msdf);
-    textRenderer.setAtlasTexture(atlasTexture);
+    textRenderer.setAtlasTexture(atlasTexture, currentFrameSlot);
 
     // Signature over everything that affects the glyph batch: the atlas and
     // each run's text/position/size/color. Unchanged content reuses the

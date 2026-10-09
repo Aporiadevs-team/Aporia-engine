@@ -15,6 +15,7 @@ struct QualityParameters {
     float reflectionScale;   // reflection target relative to main target
     float shadowStrength;    // ambient floor inside shadows
     std::uint32_t textureScalePercent;
+    std::uint32_t maxLights; // dynamic lights that reach the shader (0/8/16)
 };
 
 [[nodiscard]] QualityParameters qualityParameters(Aporia::GraphicsQuality quality) noexcept;

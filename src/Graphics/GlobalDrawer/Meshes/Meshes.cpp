@@ -85,19 +85,22 @@ bool Graphics::Impl::rebuildMeshPipelines() {
     dynamicState.dynamicStateCount = 2;
     dynamicState.pDynamicStates = dynamicStates;
 
-    VkSpecializationMapEntry specEntries[2]{};
+    VkSpecializationMapEntry specEntries[3]{};
     specEntries[0].constantID = 0;
     specEntries[0].offset = 0;
     specEntries[0].size = sizeof(std::int32_t);
     specEntries[1].constantID = 1;
     specEntries[1].offset = sizeof(std::int32_t);
     specEntries[1].size = sizeof(float);
+    specEntries[2].constantID = 2;
+    specEntries[2].offset = 2 * sizeof(std::int32_t);
+    specEntries[2].size = sizeof(std::int32_t);
     float specReflection = reflectionsEnabled ? 1.0f : 0.0f;
     std::int32_t specTaps = shadowTaps;
-    std::int32_t specData[2] = {specTaps, 0};
+    std::int32_t specData[3] = {specTaps, 0, static_cast<std::int32_t>(maxLights)};
     std::memcpy(specData + 1, &specReflection, sizeof(float));
     VkSpecializationInfo specInfo{};
-    specInfo.mapEntryCount = 2;
+    specInfo.mapEntryCount = 3;
     specInfo.pMapEntries = specEntries;
     specInfo.dataSize = sizeof(specData);
     specInfo.pData = specData;

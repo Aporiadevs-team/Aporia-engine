@@ -77,6 +77,8 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Device/SceneManager/HeadlessTarget/HeadlessTarget.cpp
         src/Device/SceneManager/QualityTargets/QualityTargets.cpp
         src/Device/SceneManager/SceneBindings/SceneBindings.cpp
+        src/Device/SceneManager/TimeManager/TimeManager.cpp
+        src/Device/SceneManager/TimeManager/GraphicsTime.cpp
         src/Device/Init/RenderPass.cpp
         src/Device/Init/GraphicsInit.cpp
         src/Device/Pipeline/PipelineFactory.cpp
@@ -84,6 +86,9 @@ if(APORIA_ENABLE_GRAPHICS)
         src/Device/Swapchain/Swapchain.cpp
         src/Device/Frame/Frame.cpp
         src/Device/Threading/JobSystem.cpp
+        src/Graphics/GlobalDrawer/Light/LightStore.cpp
+        src/Graphics/GlobalDrawer/Light/Light.cpp
+        src/Graphics/GlobalDrawer/Sky/SkyRenderer.cpp
         src/Graphics/GlobalDrawer/Materials/MaterialStore.cpp
         src/Graphics/GlobalDrawer/Materials/Materials.cpp
         src/Graphics/GlobalDrawer/Meshes/MeshRenderer.cpp
@@ -125,6 +130,8 @@ if(APORIA_ENABLE_GRAPHICS)
     set(APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/tonemap.frag.spv")
     set(APORIA_VULKAN_TAA_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/taa.frag.spv")
     set(APORIA_VULKAN_UI_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/ui.frag.spv")
+    set(APORIA_VULKAN_SKY_VERTEX_SHADER "${APORIA_VULKAN_SHADER_DIR}/sky.vert.spv")
+    set(APORIA_VULKAN_SKY_FRAGMENT_SHADER "${APORIA_VULKAN_SHADER_DIR}/sky.frag.spv")
 
     set(APORIA_GLSL_DEFINES)
     if(APORIA_EXPERIMENTAL)
@@ -217,6 +224,22 @@ if(APORIA_ENABLE_GRAPHICS)
         VERBATIM
     )
     add_custom_command(
+        OUTPUT "${APORIA_VULKAN_SKY_VERTEX_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.vert"
+            -o "${APORIA_VULKAN_SKY_VERTEX_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.vert"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${APORIA_VULKAN_SKY_FRAGMENT_SHADER}"
+        COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
+            -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.frag"
+            -o "${APORIA_VULKAN_SKY_FRAGMENT_SHADER}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.frag"
+        VERBATIM
+    )
+    add_custom_command(
         OUTPUT "${APORIA_VULKAN_TEXT_VERTEX_SHADER}"
         COMMAND "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}"
             -V "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text.vert"
@@ -251,6 +274,8 @@ if(APORIA_ENABLE_GRAPHICS)
         "${APORIA_VULKAN_TONEMAP_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_TAA_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_UI_FRAGMENT_SHADER}"
+        "${APORIA_VULKAN_SKY_VERTEX_SHADER}"
+        "${APORIA_VULKAN_SKY_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_TEXT_VERTEX_SHADER}"
         "${APORIA_VULKAN_TEXT_MSDF_FRAGMENT_SHADER}"
         "${APORIA_VULKAN_TEXT_TTF_FRAGMENT_SHADER}"
@@ -344,6 +369,8 @@ if (APORIA_BUILD_RENDER_TESTS)
     add_subdirectory(tests/graphics/9 aporia-render-test-9)
     add_subdirectory(tests/graphics/10 aporia-render-test-10)
     add_subdirectory(tests/graphics/11 aporia-render-test-11)
+    add_subdirectory(tests/graphics/12 aporia-render-test-12)
+    add_subdirectory(tests/graphics/13 aporia-render-test-13)
 endif()
 
 if(APORIA_BUILD_VISIBLE_RENDER_TESTS)

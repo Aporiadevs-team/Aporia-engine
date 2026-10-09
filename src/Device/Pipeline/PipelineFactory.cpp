@@ -248,19 +248,22 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
     meshPipelineInfo.subpass = 0;
     // Quality specialization: PCF tap count and reflection toggle compile per
     // preset, so Low pays neither cost.
-    VkSpecializationMapEntry specEntries[2]{};
+    VkSpecializationMapEntry specEntries[3]{};
     specEntries[0].constantID = 0;
     specEntries[0].offset = 0;
     specEntries[0].size = sizeof(std::int32_t);
     specEntries[1].constantID = 1;
     specEntries[1].offset = sizeof(std::int32_t);
     specEntries[1].size = sizeof(float);
+    specEntries[2].constantID = 2;
+    specEntries[2].offset = 2 * sizeof(std::int32_t);
+    specEntries[2].size = sizeof(std::int32_t);
     float specReflection = context.reflectionsEnabled ? 1.0f : 0.0f;
     std::int32_t specTaps = context.shadowTaps;
-    std::int32_t specData[2] = {specTaps, 0};
+    std::int32_t specData[3] = {specTaps, 0, context.maxLights};
     std::memcpy(specData + 1, &specReflection, sizeof(float));
     VkSpecializationInfo meshSpecInfo{};
-    meshSpecInfo.mapEntryCount = 2;
+    meshSpecInfo.mapEntryCount = 3;
     meshSpecInfo.pMapEntries = specEntries;
     meshSpecInfo.dataSize = sizeof(specData);
     meshSpecInfo.pData = specData;
@@ -273,6 +276,37 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
         meshPipelineInfo.renderPass = context.hdrRenderPass;
         if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.hdrMeshPipeline) != VK_SUCCESS) {
             error = "vkCreateGraphicsPipelines(hdr mesh) failed";
+            return false;
+        }
+    }
+
+    // Transparent mesh variants: same shaders/layout, but alpha-blended with
+    // depth writes off so glass sorts over the body without punching holes.
+    VkPipelineColorBlendAttachmentState transparentAttachment = colorAttachment;
+    transparentAttachment.blendEnable = VK_TRUE;
+    transparentAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    transparentAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    transparentAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    transparentAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    transparentAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    transparentAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    VkPipelineColorBlendStateCreateInfo transparentColorBlend = colorBlend;
+    transparentColorBlend.pAttachments = &transparentAttachment;
+
+    VkPipelineDepthStencilStateCreateInfo transparentDepthStencil = depthStencil;
+    transparentDepthStencil.depthWriteEnable = VK_FALSE;
+
+    meshPipelineInfo.pColorBlendState = &transparentColorBlend;
+    meshPipelineInfo.pDepthStencilState = &transparentDepthStencil;
+    meshPipelineInfo.renderPass = context.renderPass;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.meshTransparentPipeline) != VK_SUCCESS) {
+        error = "vkCreateGraphicsPipelines(transparent mesh) failed";
+        return false;
+    }
+    if (context.hdrRenderPass != VK_NULL_HANDLE) {
+        meshPipelineInfo.renderPass = context.hdrRenderPass;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.hdrMeshTransparentPipeline) != VK_SUCCESS) {
+            error = "vkCreateGraphicsPipelines(hdr transparent mesh) failed";
             return false;
         }
     }
@@ -479,6 +513,8 @@ void destroyPipelines(VkDevice device, PipelineSet& p) noexcept {
     destroyLayout(p.pipelineLayout);
     destroyPipeline(p.meshPipeline);
     destroyPipeline(p.hdrMeshPipeline);
+    destroyPipeline(p.meshTransparentPipeline);
+    destroyPipeline(p.hdrMeshTransparentPipeline);
     destroyLayout(p.meshPipelineLayout);
     destroyModule(p.meshVertexShader);
     destroyModule(p.meshFragmentShader);

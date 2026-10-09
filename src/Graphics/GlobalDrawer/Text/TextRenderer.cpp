@@ -301,32 +301,29 @@ void TextRenderer::destroy() noexcept {
     *this = TextRenderer{};
 }
 
-void TextRenderer::setAtlasTexture(const AtlasTexture& texture) noexcept {
+void TextRenderer::setAtlasTexture(const AtlasTexture& texture, std::uint32_t frameSlot) noexcept {
     atlas_ = texture;
-    updateDescriptors();
-}
-
-void TextRenderer::updateDescriptors() noexcept {
-    if (device_ == VK_NULL_HANDLE || atlas_.view == VK_NULL_HANDLE || atlas_.sampler == VK_NULL_HANDLE) {
+    // Only the slot about to be recorded this frame is re-pointed at the new
+    // atlas. The other ring slots may still be referenced by in-flight command
+    // buffers, and writing their descriptors while pending is a validation
+    // error (and a data race with GPU reads).
+    Slot& slot = slots_[frameSlot % SlotCount];
+    if (slot.descriptorSet == VK_NULL_HANDLE || atlas_.view == VK_NULL_HANDLE ||
+        atlas_.sampler == VK_NULL_HANDLE) {
         return;
     }
-    for (Slot& slot : slots_) {
-        if (slot.descriptorSet == VK_NULL_HANDLE) {
-            continue;
-        }
-        VkDescriptorImageInfo imageInfo{};
-        imageInfo.sampler = atlas_.sampler;
-        imageInfo.imageView = atlas_.view;
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = slot.descriptorSet;
-        write.dstBinding = 1;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo = &imageInfo;
-        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
-    }
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler = atlas_.sampler;
+    imageInfo.imageView = atlas_.view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = slot.descriptorSet;
+    write.dstBinding = 1;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 }
 
 float TextRenderer::lineHeight(const UiTextAtlasDesc& atlas, float size) const noexcept {

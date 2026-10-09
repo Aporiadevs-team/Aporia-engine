@@ -75,6 +75,7 @@ bool Graphics::renderFrame() noexcept {
     const bool timing = QueryPerformanceCounter(&startCounter) != 0 &&
                         QueryPerformanceFrequency(&frequency) != 0 && frequency.QuadPart > 0;
     const bool submitted = impl_->headless ? renderHeadlessFrame() : renderNativeFrame();
+    double frameSeconds = 1.0 / 60.0;
     if (timing && QueryPerformanceCounter(&endCounter) != 0) {
         const double milliseconds = static_cast<double>(endCounter.QuadPart - startCounter.QuadPart) *
                                     1000.0 / static_cast<double>(frequency.QuadPart);
@@ -82,7 +83,9 @@ bool Graphics::renderFrame() noexcept {
         impl_->avgFrameMs = impl_->avgFrameMs <= 0.0
             ? milliseconds
             : impl_->avgFrameMs * smoothing + milliseconds * (1.0 - smoothing);
+        frameSeconds = milliseconds / 1000.0;
     }
+    impl_->timeManager.update(frameSeconds);
     return submitted;
 }
 
@@ -329,9 +332,77 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     const std::unordered_map<std::uint64_t, VkDescriptorSet>* materialSetsArg = nullptr;
     const VkDescriptorSet defaultMaterialArg = VK_NULL_HANDLE;
 #endif
+    if (timeDrivenSun) {
+        // Sun follows the time-of-day clock: sunrise east, noon zenith, sunset west.
+        float sunDir[3];
+        timeManager.sunDirection(sunDir);
+        environment.sunDirection[0] = sunDir[0];
+        environment.sunDirection[1] = sunDir[1];
+        environment.sunDirection[2] = sunDir[2];
+        // Daylight ramps smoothly with the sun elevation so the intensity never
+        // snaps: dim at the horizon, full by ~15 degrees, dark below.
+        const float e = sunDir[2];
+        float t = (e + 0.05f) / 0.30f;
+        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+        environment.sunIntensity = t * t * (3.0f - 2.0f * t);
+    }
+
     float sunMatrix[16];
     buildSunMatrix(sunMatrix);
     writeSceneUniforms(uniformSlot, sunMatrix);
+
+    {
+        graphics_internal::SkyRenderer::Uniforms skyUniforms{};
+        const float* view = pendingCamera.viewMatrix;
+        const float* proj = pendingProjection;
+        // Column-major view: right = column 0, up = column 1, back = column 2.
+        skyUniforms.cameraRight[0] = view[0];
+        skyUniforms.cameraRight[1] = view[4];
+        skyUniforms.cameraRight[2] = view[8];
+        skyUniforms.cameraUp[0] = view[1];
+        skyUniforms.cameraUp[1] = view[5];
+        skyUniforms.cameraUp[2] = view[9];
+        skyUniforms.cameraForward[0] = -view[2];
+        skyUniforms.cameraForward[1] = -view[6];
+        skyUniforms.cameraForward[2] = -view[10];
+        skyUniforms.cameraPosition[0] = static_cast<float>(pendingCamera.position[0]);
+        skyUniforms.cameraPosition[1] = static_cast<float>(pendingCamera.position[1]);
+        skyUniforms.cameraPosition[2] = static_cast<float>(pendingCamera.position[2]);
+        skyUniforms.sunDirection[0] = environment.sunDirection[0];
+        skyUniforms.sunDirection[1] = environment.sunDirection[1];
+        skyUniforms.sunDirection[2] = environment.sunDirection[2];
+        skyUniforms.sunDirection[3] = environment.sunIntensity;
+        skyUniforms.sunColor[0] = 1.0f;
+        skyUniforms.sunColor[1] = 0.94f;
+        skyUniforms.sunColor[2] = 0.82f;
+        skyUniforms.sunColor[3] = 1.0f;
+        skyUniforms.skyParams[0] = 0.5f;  // horizon exponent
+        skyUniforms.skyParams[1] = 0.45f; // haze
+        skyUniforms.skyParams[2] = 1.0f;  // glow
+        // tan(halfFovY) and aspect derived from the projection matrix.
+        const float focal = proj[5] != 0.0f ? -1.0f / proj[5] : 0.7f;
+        skyUniforms.skyParams[3] = focal > 0.0f ? focal : 0.7f;
+        skyUniforms.renderParams[0] = (proj[0] != 0.0f && focal > 0.0f) ? (-proj[5] / proj[0]) : 1.0f;
+
+        // Twilight glow: warm band around the sun near the horizon. Dawn is pale
+        // yellow, dusk pale pink; it fades slowly across ~nautical twilight so
+        // the colour lingers after (or before) the sun crosses the horizon.
+        const auto smoothstep = [](float a, float b, float x) {
+            float t = (x - a) / (b - a);
+            t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+            return t * t * (3.0f - 2.0f * t);
+        };
+        const float elevation = environment.sunDirection[2];
+        skyUniforms.twilight[3] =
+            smoothstep(-0.30f, -0.02f, elevation) * (1.0f - smoothstep(0.02f, 0.35f, elevation));
+        const double rise = timeManager.sunriseHour();
+        const double set = timeManager.sunsetHour();
+        const bool morning = timeDrivenSun && timeManager.totalHours() < (rise + set) * 0.5;
+        skyUniforms.twilight[0] = morning ? 0.98f : 0.97f;
+        skyUniforms.twilight[1] = morning ? 0.86f : 0.62f;
+        skyUniforms.twilight[2] = morning ? 0.55f : 0.52f;
+        sky.writeUniforms(device, uniformSlot, skyUniforms);
+    }
 
     const bool recordShadow = shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty();
 #if defined(APORIA_EXPERIMENTAL)
@@ -461,10 +532,30 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             vkCmdDraw(mainMeshCb, 3, 1, 0, 0);
         }
         if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
-            graphics_internal::MeshRenderer::renderMeshes(
-                mainMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
-                scene.set(uniformSlot), pendingViewProj,
-                pendingItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
+            std::vector<RenderItem> opaqueItems;
+            std::vector<RenderItem> transparentItems;
+            opaqueItems.reserve(pendingItems.size());
+            for (const RenderItem& item : pendingItems) {
+                if (item.transparent) {
+                    transparentItems.push_back(item);
+                } else {
+                    opaqueItems.push_back(item);
+                }
+            }
+            if (!opaqueItems.empty()) {
+                graphics_internal::MeshRenderer::renderMeshes(
+                    mainMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+                    scene.set(uniformSlot), pendingViewProj,
+                    opaqueItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
+            }
+            const VkPipeline transparentPipeline =
+                useHdr ? pipelines.hdrMeshTransparentPipeline : pipelines.meshTransparentPipeline;
+            if (!transparentItems.empty() && transparentPipeline != VK_NULL_HANDLE) {
+                graphics_internal::MeshRenderer::renderMeshes(
+                    mainMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+                    scene.set(uniformSlot), pendingViewProj,
+                    transparentItems, meshStore.resources(), transparentPipeline, materialSetsArg, defaultMaterialArg);
+            }
         }
         vkEndCommandBuffer(mainMeshCb);
         haveMainMesh = true;
@@ -475,6 +566,15 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         setViewportScissor(uiRectCb, width, height);
         if (pipelines.uiPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(uiRectCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.uiPipeline);
+        }
+        // uiPipeline shares the tonemap vertex shader and layout, which reads the
+        // bindless scene descriptor set 0; without a bound set every UI rect draw
+        // is invalid (missing descriptor) and nothing composites.
+        if (tonemapDescriptorSet != VK_NULL_HANDLE) {
+            const VkDescriptorSet uiRectSet = tonemapDescriptorSet;
+            vkCmdBindDescriptorSets(uiRectCb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipelines.tonemapPipelineLayout, 0u, 1u, &uiRectSet, 0u,
+                                    nullptr);
         }
         rectRenderer.draw(uiRectCb, pipelines.tonemapPipelineLayout, width, height, uiDrawList);
         vkEndCommandBuffer(uiRectCb);
@@ -508,6 +608,16 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         haveTonemap = true;
     }
 
+    // Sky background: a fullscreen secondary drawn first in the main pass.
+    VkCommandBuffer skyCb = secondaryBuffers[slotIndex][kSecondarySky];
+    bool haveSky = false;
+    if (sky.valid() && beginSecondary(skyCb, mainRenderPass, mainFramebuffer)) {
+        setViewportScissor(skyCb, mainWidth, mainHeight);
+        sky.record(skyCb, useHdr, uniformSlot);
+        vkEndCommandBuffer(skyCb);
+        haveSky = true;
+    }
+
     // ---- primary: begin the render passes and execute the secondaries ----
     if (haveReflectMesh) {
         std::array<VkClearValue, 2> reflectClear{};
@@ -538,8 +648,11 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         begin.pClearValues = clearValues.data();
         vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 
-        VkCommandBuffer mainCommands[3]{};
+        VkCommandBuffer mainCommands[4]{};
         std::uint32_t mainCommandCount = 0;
+        if (haveSky) {
+            mainCommands[mainCommandCount++] = skyCb;
+        }
         if (haveMainMesh) {
             mainCommands[mainCommandCount++] = mainMeshCb;
         }
@@ -589,7 +702,7 @@ void Graphics::Impl::writeSceneUniforms(std::uint32_t slot, const float sunMatri
     uniforms.cameraPosition[0] = static_cast<float>(pendingCamera.position[0]);
     uniforms.cameraPosition[1] = static_cast<float>(pendingCamera.position[1]);
     uniforms.cameraPosition[2] = static_cast<float>(pendingCamera.position[2]);
-    uniforms.shadingParams[0] = 0.32f; // ambient
+    uniforms.shadingParams[0] = environment.ambient;
     uniforms.shadingParams[1] = shadowsEnabled ? shadowStrength : 1.0f;
     uniforms.shadingParams[2] = environment.mirrorZ;
     uniforms.shadingParams[3] = shadowMapSize > 0 ? 1.0f / static_cast<float>(shadowMapSize) : 0.0f;
@@ -599,6 +712,16 @@ void Graphics::Impl::writeSceneUniforms(std::uint32_t slot, const float sunMatri
     uniforms.shadowParams[1] = static_cast<float>(shadowConfig.blockerSamples);
     uniforms.shadowParams[2] = static_cast<float>(shadowConfig.filterSamples);
     uniforms.shadowParams[3] = shadowConfig.contactShadows ? shadowConfig.contactDistance : 0.0f;
+
+    const std::uint32_t lightCount = lightStore.count();
+    const std::uint32_t activeLights = lightCount < maxLights ? lightCount : maxLights;
+    uniforms.lightInfo[0] = static_cast<float>(activeLights);
+    for (std::uint32_t index = 0; index < activeLights; ++index) {
+        std::memcpy(uniforms.lightPosition[index], lightStore.position[index], sizeof(uniforms.lightPosition[index]));
+        std::memcpy(uniforms.lightDirection[index], lightStore.direction[index], sizeof(uniforms.lightDirection[index]));
+        std::memcpy(uniforms.lightColor[index], lightStore.color[index], sizeof(uniforms.lightColor[index]));
+        std::memcpy(uniforms.lightParams[index], lightStore.params[index], sizeof(uniforms.lightParams[index]));
+    }
     scene.writeUniforms(slot, &uniforms, sizeof(uniforms));
 }
 
