@@ -113,6 +113,26 @@ public:
         const std::vector<TextGlyph>& glyphs,
         std::uint64_t signature) noexcept;
 
+    // Uploads a whole glyph batch once (persistent when the signature matches).
+    void uploadText(
+        std::uint32_t frameSlot,
+        float screenWidth,
+        float screenHeight,
+        float guiScale,
+        float outlineWidth,
+        const TextColor& outlineColor,
+        const std::vector<TextGlyph>& glyphs,
+        std::uint64_t signature) noexcept;
+
+    // Draws a sub-range of the currently-uploaded batch for `frameSlot`. Lets the
+    // layered UI draw each layer's glyphs from one shared upload (via firstVertex)
+    // instead of re-uploading per layer and clobbering the previous batch.
+    void drawTextRange(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t frameSlot,
+        std::uint32_t firstGlyph,
+        std::uint32_t glyphCount) noexcept;
+
     [[nodiscard]] bool initialized() const noexcept { return device_ != VK_NULL_HANDLE; }
 
 private:

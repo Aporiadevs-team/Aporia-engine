@@ -19,11 +19,24 @@ namespace {
 constexpr wchar_t kClassName[] = L"AporiaRenderTest7Window";
 bool running = true;
 bool settingsOpen = false;
+bool debugOverlay = false;
 Aporia::Graphics* graphics = nullptr;
 Aporia::GraphicsQuality quality = Aporia::GraphicsQuality::High;
 bool playerUltra = false;
 SHORT previousEscape = 0;
+SHORT previousH = 0;
 SHORT previousKeys[4] = {};
+
+// Draggable debug overlay (H). Position is the panel's top-left in client pixels.
+constexpr float kPanelW = 420.0f;
+constexpr float kPanelH = 190.0f;
+float debugPanelX = 0.0f;
+float debugPanelY = 0.0f;
+bool debugPanelInit = false;
+bool dragging = false;
+float dragOffsetX = 0.0f;
+float dragOffsetY = 0.0f;
+bool previousLmb = false;
 
 const wchar_t* qualityName(Aporia::GraphicsQuality value) {
     switch (value) {
@@ -91,6 +104,12 @@ void pollSettingsKeys(HWND window) {
         InvalidateRect(window, nullptr, FALSE);
     }
     previousEscape = escape;
+    const SHORT h = GetAsyncKeyState('H');
+    if ((h & 0x8000) != 0 && (previousH & 0x8000) == 0) {
+        debugOverlay = !debugOverlay;
+        InvalidateRect(window, nullptr, FALSE);
+    }
+    previousH = h;
     const int keys[] = {'1', '2', '3', 'U'};
     for (int index = 0; index < 4; ++index) {
         const SHORT state = GetAsyncKeyState(keys[index]);
@@ -211,6 +230,38 @@ int main() {
         GetClientRect(window, &client);
         const double width = std::max<LONG>(1, client.right - client.left);
         const double height = std::max<LONG>(1, client.bottom - client.top);
+
+        // Drag the debug overlay panel with the left mouse button.
+        {
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            ScreenToClient(window, &cursor);
+            const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            if (debugOverlay) {
+                if (!debugPanelInit) {
+                    debugPanelX = static_cast<float>(width) * 0.5f - kPanelW * 0.5f;
+                    debugPanelY = static_cast<float>(height) * 0.5f - kPanelH * 0.5f;
+                    debugPanelInit = true;
+                }
+                if (lmb && !previousLmb &&
+                    cursor.x >= debugPanelX && cursor.x <= debugPanelX + kPanelW &&
+                    cursor.y >= debugPanelY && cursor.y <= debugPanelY + kPanelH) {
+                    dragging = true;
+                    dragOffsetX = static_cast<float>(cursor.x) - debugPanelX;
+                    dragOffsetY = static_cast<float>(cursor.y) - debugPanelY;
+                } else if (!lmb) {
+                    dragging = false;
+                }
+                if (dragging) {
+                    debugPanelX = static_cast<float>(cursor.x) - dragOffsetX;
+                    debugPanelY = static_cast<float>(cursor.y) - dragOffsetY;
+                }
+            } else {
+                dragging = false;
+            }
+            previousLmb = lmb;
+        }
+
         const Aporia::CameraState camera = cameraFor(width / height, time);
         std::vector<Aporia::RenderItem> items;
         addItem(items, ground, Aporia::Mat4::identity(), white);
@@ -233,7 +284,33 @@ int main() {
             -2.0 * std::cos(time), 1.5 * std::sin(time * 0.7), 1.0 + 0.8 * std::abs(std::sin(time))});
         addItem(items, sphere, sphereModel, gold);
 
+        // Layered UI: every element carries a UiLayer. The engine draws them
+        // low-to-high (beforeworld < world < hud < gui < overlay), interleaving
+        // rects and text per layer. H toggles an Overlay "debug sheet" that blurs
+        // the layers below it; ESC shows the Gui settings panel.
         Aporia::UiDrawList ui;
+        ui.font = font;
+        ui.cornerRadius = 12.0f;
+        const auto addRect = [&](float x, float y, float w, float h, Aporia::UiColor color,
+                                 Aporia::UiLayer layer) {
+            ui.roundedRects.push_back({{x, y, w, h, layer}, color});
+        };
+        const auto addText = [&](std::string_view text, float x, float y, float size,
+                                 Aporia::UiColor color, Aporia::UiLayer layer) {
+            Aporia::UiTextRun run;
+            run.text = text;
+            run.x = x;
+            run.y = y;
+            run.size = size;
+            run.color = color;
+            run.layer = layer;
+            ui.textRuns.push_back(run);
+        };
+
+        // Hud layer: always-on status line.
+        addText("TEST 7   H: debug overlay (Overlay)   ESC: settings (Gui)",
+                16.0f, 14.0f, 15.0f, {0.9f, 0.95f, 1.0f, 1.0f}, Aporia::UiLayer::Hud);
+
         std::string ultraLine;
         std::string presetLine;
         if (settingsOpen) {
@@ -241,17 +318,37 @@ int main() {
             presetLine = std::string("Current preset: ") +
                 (quality == Aporia::GraphicsQuality::Low ? "Low"
                  : quality == Aporia::GraphicsQuality::Medium ? "Medium" : "High");
-            ui.font = font;
-            ui.cornerRadius = 12.0f;
             ui.blur.mode = Aporia::BlurMode::Kawase;
-            ui.blur.radius = 5.0f;
+            ui.blur.radius = 10.0f;
             ui.blur.intensity = 0.9f;
-            ui.roundedRects.push_back({{24.0f, 24.0f, 370.0f, 185.0f}, {0.04f, 0.06f, 0.10f, 0.94f}});
-            ui.textRuns.push_back({"GRAPHICS SETTINGS", 48.0f, 48.0f, 24.0f, {0.95f, 0.97f, 1.0f, 1.0f}});
-            ui.textRuns.push_back({"1 Low    2 Medium    3 High", 48.0f, 88.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
-            ui.textRuns.push_back({ultraLine, 48.0f, 116.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
-            ui.textRuns.push_back({presetLine, 48.0f, 144.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}});
-            ui.textRuns.push_back({"ESC close settings", 48.0f, 174.0f, 14.0f, {0.65f, 0.70f, 0.78f, 1.0f}});
+            addRect(24.0f, 24.0f, 370.0f, 185.0f, {0.04f, 0.06f, 0.10f, 0.55f}, Aporia::UiLayer::Gui);
+            addText("GRAPHICS SETTINGS", 48.0f, 48.0f, 24.0f, {0.95f, 0.97f, 1.0f, 1.0f}, Aporia::UiLayer::Gui);
+            addText("1 Low    2 Medium    3 High", 48.0f, 88.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}, Aporia::UiLayer::Gui);
+            addText(ultraLine, 48.0f, 116.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}, Aporia::UiLayer::Gui);
+            addText(presetLine, 48.0f, 144.0f, 16.0f, {0.85f, 0.88f, 0.94f, 1.0f}, Aporia::UiLayer::Gui);
+            addText("ESC close settings", 48.0f, 174.0f, 14.0f, {0.65f, 0.70f, 0.78f, 1.0f}, Aporia::UiLayer::Gui);
+        }
+
+        std::string debugLine;
+        if (debugOverlay) {
+            debugLine = "layers: beforeworld < world < hud < gui < overlay";
+            ui.backdropBlur = true;
+            ui.blur.displaySpaceSource = true;
+            // Layer blur: the top (Overlay) layer blurs the whole composite of the
+            // scene plus every layer below it, then draws itself sharp on top.
+            ui.blur.mode = Aporia::BlurMode::Kawase;
+            ui.blur.radius = 14.0f;
+            ui.blur.intensity = 1.0f;
+            addRect(debugPanelX, debugPanelY, kPanelW, kPanelH,
+                    {0.06f, 0.07f, 0.11f, 0.6f}, Aporia::UiLayer::Overlay);
+            addText("DEBUG OVERLAY  (drag me)", debugPanelX + 20.0f, debugPanelY + 22.0f, 20.0f,
+                    {1.0f, 0.85f, 0.4f, 1.0f}, Aporia::UiLayer::Overlay);
+            addText(debugLine, debugPanelX + 20.0f, debugPanelY + 56.0f, 14.0f,
+                    {0.8f, 0.85f, 0.92f, 1.0f}, Aporia::UiLayer::Overlay);
+            addText("blurs the layers below it", debugPanelX + 20.0f, debugPanelY + 80.0f, 14.0f,
+                    {0.8f, 0.85f, 0.92f, 1.0f}, Aporia::UiLayer::Overlay);
+            addText("H close", debugPanelX + 20.0f, debugPanelY + kPanelH - 30.0f, 14.0f,
+                    {0.65f, 0.70f, 0.78f, 1.0f}, Aporia::UiLayer::Overlay);
         }
         localGraphics.setUiDrawList(std::move(ui));
 
@@ -268,3 +365,27 @@ int main() {
     UnregisterClassW(kClassName, instance);
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

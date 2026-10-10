@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <string_view>
 
@@ -208,22 +209,27 @@ BakedFontAtlas bakeTtfAtlas(
         const std::vector<std::uint8_t>& fontBytes,
         float pixelSize,
         float oversample) {
+    
     BakedFontAtlas result;
     if (fontBytes.empty() || pixelSize <= 0.0f) {
+        
         return result;
     }
 
     const auto* data = reinterpret_cast<const unsigned char*>(fontBytes.data());
     stbtt_fontinfo info;
     if (!stbtt_InitFont(&info, data, stbtt_GetFontOffsetForIndex(data, 0))) {
+        
         return result;
     }
+    
 
     int ascent = 0;
     int descent = 0;
     int lineGap = 0;
     stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
     const float vScale = stbtt_ScaleForMappingEmToPixels(&info, pixelSize);
+    
 
     struct Range {
         int first;
@@ -246,11 +252,14 @@ BakedFontAtlas bakeTtfAtlas(
 
     std::vector<std::uint8_t> bitmap(static_cast<std::size_t>(side) * side, 0);
     std::vector<stbtt_packedchar> packed(static_cast<std::size_t>(total));
+    
 
     stbtt_pack_context context{};
     if (!stbtt_PackBegin(&context, bitmap.data(), side, side, 0, static_cast<int>(padding), nullptr)) {
+        
         return result;
     }
+    
     const int oversampleInt = static_cast<int>(std::max(1.0f, oversample));
     stbtt_PackSetOversampling(&context, static_cast<unsigned int>(oversampleInt),
                               static_cast<unsigned int>(oversampleInt));
@@ -261,7 +270,9 @@ BakedFontAtlas bakeTtfAtlas(
         stbtt_PackFontRange(&context, data, 0, -pixelSize, range.first, count, packed.data() + offset);
         offset += count;
     }
+    
     stbtt_PackEnd(&context);
+    
 
     result.width = static_cast<std::uint32_t>(side);
     result.height = static_cast<std::uint32_t>(side);
@@ -269,6 +280,7 @@ BakedFontAtlas bakeTtfAtlas(
     for (std::size_t index = 0; index < bitmap.size(); ++index) {
         result.pixels[index * 4 + 3] = bitmap[index];
     }
+    
 
     result.atlas.mode = UiTextAtlasMode::TtfBitmap;
     result.atlas.emSize = pixelSize;
@@ -307,6 +319,7 @@ BakedFontAtlas bakeTtfAtlas(
             result.atlas.glyphs.push_back(glyph);
         }
     }
+    
     return result;
 }
 

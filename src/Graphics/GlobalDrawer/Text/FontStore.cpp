@@ -5,6 +5,7 @@
 #include "Graphics/GlobalDrawer/Text/FontAtlasBuilder.hpp"
 #include "Graphics/TextureManager/TextureStore.hpp"
 
+#include <cstdio>
 #include <utility>
 
 namespace Aporia::graphics_internal {
@@ -15,12 +16,15 @@ FontHandle FontStore::createFromTtf(
     TextureStore& textures,
     SceneBindings& scene,
     std::string& error) {
+    
     const std::vector<std::uint8_t> bytes = readFileBytes(ttfPath);
+    
     if (bytes.empty()) {
         error = "TTF file could not be read";
         return invalidFontHandle;
     }
     BakedFontAtlas baked = bakeTtfAtlas(bytes, pixelSize);
+    
     if (baked.pixels.empty() || baked.atlas.glyphs.empty()) {
         error = "TTF atlas baking failed";
         return invalidFontHandle;
@@ -32,7 +36,9 @@ FontHandle FontStore::createFromTtf(
     textureDescription.format = TextureFormat::Rgba8Unorm;
     textureDescription.pixels = baked.pixels.data();
     textureDescription.dataSize = baked.pixels.size();
+    
     const TextureHandle texture = textures.create(textureDescription, scene, error);
+    
     if (!texture.valid()) {
         return invalidFontHandle;
     }
@@ -43,6 +49,7 @@ FontHandle FontStore::createFromTtf(
     resource.atlas.texture = texture;
     const std::uint64_t id = nextFontId_++;
     fonts_[id] = std::move(resource);
+    
     return FontHandle{id};
 }
 

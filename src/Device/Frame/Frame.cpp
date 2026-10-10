@@ -11,6 +11,8 @@
 
 #include "Device/SceneManager/HeadlessTarget/HeadlessTarget.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -45,14 +47,8 @@ void traceFrame(
     std::fprintf(
         stderr,
         "[Aporia frame] %s swap=%ux%u window=%ux%u fmt=%d img=%u res=%d\n",
-        stage,
-        swapWidth,
-        swapHeight,
-        windowWidth,
-        windowHeight,
-        static_cast<int>(format),
-        imageIndex,
-        static_cast<int>(result));
+        stage, swapWidth, swapHeight, windowWidth, windowHeight,
+        static_cast<int>(format), imageIndex, static_cast<int>(result));
     std::fflush(stderr);
 }
 }
@@ -75,6 +71,7 @@ bool Graphics::renderFrame() noexcept {
     const bool timing = QueryPerformanceCounter(&startCounter) != 0 &&
                         QueryPerformanceFrequency(&frequency) != 0 && frequency.QuadPart > 0;
     const bool submitted = impl_->headless ? renderHeadlessFrame() : renderNativeFrame();
+    
     double frameSeconds = 1.0 / 60.0;
     if (timing && QueryPerformanceCounter(&endCounter) != 0) {
         const double milliseconds = static_cast<double>(endCounter.QuadPart - startCounter.QuadPart) *
@@ -111,8 +108,10 @@ bool Graphics::renderHeadlessFrame() noexcept {
         return false;
     }
     if (!impl_->renderFrameCommands(impl_->framebuffer, impl_->renderWidth, impl_->renderHeight)) {
+        
         return false;
     }
+    
 
     VkCommandBuffer frameBuffers[2]{};
     std::uint32_t frameBufferCount = 0;
@@ -133,8 +132,10 @@ bool Graphics::renderHeadlessFrame() noexcept {
     submitInfo.pCommandBuffers = frameBuffers;
     if (vkQueueSubmit(impl_->queue, 1, &submitInfo, impl_->frameSync.fences[frameSlot]) != VK_SUCCESS) {
         impl_->lastError = "vkQueueSubmit failed";
+        
         return false;
     }
+    
 
     ++impl_->frameCount;
     impl_->currentFrameSlot = (frameSlot + 1) % Impl::maxFramesInFlight;
@@ -323,6 +324,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         setError("vkBeginCommandBuffer failed");
         return false;
     }
+    
 
     const std::uint32_t uniformSlot = currentFrameSlot % graphics_internal::SceneBindings::kSlots;
 #if defined(APORIA_EXPERIMENTAL)
@@ -350,8 +352,9 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     float sunMatrix[16];
     buildSunMatrix(sunMatrix);
     writeSceneUniforms(uniformSlot, sunMatrix);
+    
 
-    {
+    if (sky.valid()) {
         graphics_internal::SkyRenderer::Uniforms skyUniforms{};
         const float* view = pendingCamera.viewMatrix;
         const float* proj = pendingProjection;
@@ -403,6 +406,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         skyUniforms.twilight[2] = morning ? 0.55f : 0.52f;
         sky.writeUniforms(device, uniformSlot, skyUniforms);
     }
+    
 
     const bool recordShadow = shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty();
 #if defined(APORIA_EXPERIMENTAL)
@@ -454,6 +458,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             0, 0, nullptr, 0, nullptr, 1, &shadowBarrier);
     }
 #endif
+    
 
     // Main target selection (HDR scene target or the final target at Low).
     VkFramebuffer mainFramebuffer = targetFramebuffer;
@@ -472,9 +477,83 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     const bool useReflection = reflectionsEnabled && reflectFramebuffer != VK_NULL_HANDLE;
     const bool drawDebug = drawDebugTriangle && !useHdr;
 
+#if defined(APORIA_EXPERIMENTAL)
+    // Froxel volumetric fog: a compute pass fills the 3D grid with in-scattered
+    // sunlight, then the tonemap pass marches the grid to the stored scene depth.
+    // Only runs when a shadow map exists for this frame (the inject reads it).
+    {
+        const bool volumetricActive = useHdr && recordShadow && volumetric.storageSupported();
+        const float fogNear = 0.1f;
+        const float fogFar = 200.0f;
+        const float fogMaxDistance = 70.0f;
+        const float fogSteps = activeQuality == Aporia::GraphicsQuality::High ? 40.0f : 24.0f;
+
+        if (volumetricActive) {
+            // Shadow map is read in the compute stage: make its writes visible.
+            VkImageMemoryBarrier shadowReadBarrier{};
+            shadowReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            shadowReadBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            shadowReadBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            shadowReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadowReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            shadowReadBarrier.image = shadow.image;
+            shadowReadBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            shadowReadBarrier.subresourceRange.levelCount = 1;
+            shadowReadBarrier.subresourceRange.layerCount = 1;
+            shadowReadBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            shadowReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &shadowReadBarrier);
+
+            graphics_internal::VolumetricRenderer::InjectParams inject{};
+            std::memcpy(inject.invViewProj, taaInvViewProj, sizeof(inject.invViewProj));
+            std::memcpy(inject.sunViewProj, sunMatrix, sizeof(inject.sunViewProj));
+            inject.cameraPosition[0] = static_cast<float>(pendingCamera.position[0]);
+            inject.cameraPosition[1] = static_cast<float>(pendingCamera.position[1]);
+            inject.cameraPosition[2] = static_cast<float>(pendingCamera.position[2]);
+            inject.sunDirection[0] = environment.sunDirection[0];
+            inject.sunDirection[1] = environment.sunDirection[1];
+            inject.sunDirection[2] = environment.sunDirection[2];
+            inject.sunDirection[3] = environment.sunIntensity;
+            inject.sunColor[0] = 1.0f;
+            inject.sunColor[1] = 0.94f;
+            inject.sunColor[2] = 0.82f;
+            inject.fogParams[0] = fogNear;
+            inject.fogParams[1] = fogFar;
+            inject.fogParams[2] = 0.009f; // density
+            inject.fogParams[3] = 0.05f;  // height falloff (1/m)
+            inject.gridParams[0] = 0.6f;  // Henyey-Greenstein g
+            inject.gridParams[1] = 0.06f; // noise scale
+            inject.gridParams[2] = 0.0f;  // ground z
+            inject.gridParams[3] = static_cast<float>(frameCount) * 0.05f; // time
+            volumetric.writeParams(uniformSlot, inject);
+            volumetric.record(cmd, uniformSlot);
+        }
+
+        VolumetricUniforms integrate{};
+        std::memcpy(integrate.invViewProj, taaInvViewProj, sizeof(integrate.invViewProj));
+        integrate.cameraPosition[0] = static_cast<float>(pendingCamera.position[0]);
+        integrate.cameraPosition[1] = static_cast<float>(pendingCamera.position[1]);
+        integrate.cameraPosition[2] = static_cast<float>(pendingCamera.position[2]);
+        integrate.params[0] = fogNear;
+        integrate.params[1] = fogFar;
+        integrate.params[2] = fogMaxDistance;
+        integrate.params[3] = fogSteps;
+        integrate.params2[0] = 1.0f; // strength
+        integrate.params2[1] = volumetricActive ? 1.0f : 0.0f;
+        writeTonemapVolumetric(integrate);
+    }
+#endif
+    
+
     // ---- record one secondary command buffer per renderer/pass ----
+    // A null framebuffer records a framebuffer-compatible secondary, so the same
+    // command buffer can be executed into any compatible framebuffer (used by the
+    // backdrop path, which runs the UI into both uiTarget and the final target).
     const auto beginSecondary = [](VkCommandBuffer cb, VkRenderPass renderPass, VkFramebuffer framebuffer) -> bool {
-        if (cb == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE || framebuffer == VK_NULL_HANDLE) {
+        if (cb == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE) {
             return false;
         }
         vkResetCommandBuffer(cb, 0);
@@ -522,6 +601,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
 
     // Mesh pass secondary (debug triangle + scene meshes live in the same one).
     bool haveMainMesh = false;
+    
     if ((!pendingItems.empty() || drawDebug) && beginSecondary(mainMeshCb, mainRenderPass, mainFramebuffer)) {
         setViewportScissor(mainMeshCb, mainWidth, mainHeight);
         if (drawDebug) {
@@ -560,53 +640,165 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         vkEndCommandBuffer(mainMeshCb);
         haveMainMesh = true;
     }
+    
+
+    // The glass panels sample a pre-blurred half-res copy of the scene. TAA
+    // reshapes the HDR target the blur would read, so skip it there.
+    const bool taaRequested = useHdr &&
+        static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA;
+    const bool uiBlurActive = useHdr && !taaRequested && uiDrawList.blur.mode != BlurMode::None &&
+        pipelines.blurPipeline != VK_NULL_HANDLE && blurReady();
+    const VkDescriptorSet uiSceneSet =
+        (uiBlurActive && blurBSet != VK_NULL_HANDLE) ? blurBSet : tonemapDescriptorSet;
+
+    bool backdrop = false;
+    int topLayer = -1;
+#if defined(APORIA_EXPERIMENTAL)
+    layerStack.build(uiDrawList);
+    for (int layerIndex = static_cast<int>(Aporia::kUiLayerCount) - 1; layerIndex >= 0; --layerIndex) {
+        const Aporia::UiDrawList& candidate =
+            layerStack.bucket(static_cast<Aporia::UiLayer>(layerIndex));
+        if (!candidate.roundedRects.empty() || !candidate.textRuns.empty()) {
+            topLayer = layerIndex;
+            break;
+        }
+    }
+    backdrop = useHdr && !taaRequested && uiDrawList.backdropBlur &&
+        pipelines.blurPresentPipeline != VK_NULL_HANDLE && uiTargetReady() && topLayer > 0;
+#endif
 
     bool haveUiRect = false;
+    bool haveUiText = false;
+    bool havePresent = false;
+    VkCommandBuffer presentCb = secondaryBuffers[slotIndex][kSecondaryPresent];
+#if defined(APORIA_EXPERIMENTAL)
+    const auto recordBucket = [&](VkCommandBuffer cb, Aporia::UiLayer layer,
+                                  VkDescriptorSet sceneSet) {
+        Aporia::UiDrawList bucket = layerStack.bucket(layer);
+        if (!bucket.roundedRects.empty() && pipelines.uiPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.uiPipeline);
+            if (sceneSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipelines.tonemapPipelineLayout, 0u, 1u, &sceneSet, 0u, nullptr);
+            }
+            rectRenderer.draw(cb, pipelines.tonemapPipelineLayout, width, height, bucket);
+        }
+        if (!bucket.textRuns.empty()) {
+            drawUiTextLayer(cb, layer);
+        }
+    };
+    prepareUiText(width, height, uiDrawList);
+    if (backdrop) {
+        // The UI is accumulated layer by layer in the primary section; here we
+        // only record the final present of the uiTarget composite.
+        if (beginSecondary(presentCb, renderPass, VK_NULL_HANDLE)) {
+            setViewportScissor(presentCb, width, height);
+            if (pipelines.blurPresentPipeline != VK_NULL_HANDLE && uiTargetSet != VK_NULL_HANDLE) {
+                vkCmdBindPipeline(presentCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.blurPresentPipeline);
+                vkCmdBindDescriptorSets(presentCb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipelines.tonemapPipelineLayout, 0u, 1u, &uiTargetSet, 0u, nullptr);
+                const float push[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                vkCmdPushConstants(presentCb, pipelines.tonemapPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(push), push);
+                vkCmdDraw(presentCb, 4, 1, 0, 0);
+            }
+            vkEndCommandBuffer(presentCb);
+            havePresent = true;
+        }
+    } else if (beginSecondary(uiRectCb, renderPass, targetFramebuffer)) {
+        setViewportScissor(uiRectCb, width, height);
+        for (std::uint32_t layerIndex = 0; layerIndex < Aporia::kUiLayerCount; ++layerIndex) {
+            recordBucket(uiRectCb, static_cast<Aporia::UiLayer>(layerIndex), uiSceneSet);
+        }
+        vkEndCommandBuffer(uiRectCb);
+        haveUiRect = true;
+    }
+#else
     if (beginSecondary(uiRectCb, renderPass, targetFramebuffer)) {
         setViewportScissor(uiRectCb, width, height);
         if (pipelines.uiPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(uiRectCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.uiPipeline);
         }
-        // uiPipeline shares the tonemap vertex shader and layout, which reads the
-        // bindless scene descriptor set 0; without a bound set every UI rect draw
-        // is invalid (missing descriptor) and nothing composites.
-        if (tonemapDescriptorSet != VK_NULL_HANDLE) {
-            const VkDescriptorSet uiRectSet = tonemapDescriptorSet;
+        if (uiSceneSet != VK_NULL_HANDLE) {
             vkCmdBindDescriptorSets(uiRectCb, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pipelines.tonemapPipelineLayout, 0u, 1u, &uiRectSet, 0u,
+                                    pipelines.tonemapPipelineLayout, 0u, 1u, &uiSceneSet, 0u,
                                     nullptr);
         }
         rectRenderer.draw(uiRectCb, pipelines.tonemapPipelineLayout, width, height, uiDrawList);
         vkEndCommandBuffer(uiRectCb);
         haveUiRect = true;
     }
-    bool haveUiText = false;
     if (beginSecondary(uiTextCb, renderPass, targetFramebuffer)) {
         setViewportScissor(uiTextCb, width, height);
-        renderUiText(uiTextCb, width, height);
+        renderUiText(uiTextCb, width, height, uiDrawList);
         vkEndCommandBuffer(uiTextCb);
         haveUiText = true;
     }
+#endif
 
     bool haveTonemap = false;
-    if (useHdr && beginSecondary(tonemapCb, renderPass, targetFramebuffer)) {
+    if (useHdr && beginSecondary(tonemapCb, renderPass, VK_NULL_HANDLE)) {
         setViewportScissor(tonemapCb, width, height);
         vkCmdBindPipeline(tonemapCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.tonemapPipeline);
         vkCmdBindDescriptorSets(tonemapCb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.tonemapPipelineLayout,
                                 0, 1, &tonemapDescriptorSet, 0, nullptr);
+        // Sun screen position for the god rays (project a far point along the
+        // sun direction; invisible when behind the camera or below the horizon).
+        float sunScreenX = 0.5f;
+        float sunScreenY = 0.5f;
+        float raysVisible = 0.0f;
+        {
+            const float sunDistance = 1000.0f;
+            const float wx = static_cast<float>(pendingCamera.position[0] + environment.sunDirection[0] * sunDistance);
+            const float wy = static_cast<float>(pendingCamera.position[1] + environment.sunDirection[1] * sunDistance);
+            const float wz = static_cast<float>(pendingCamera.position[2] + environment.sunDirection[2] * sunDistance);
+            const float* vp = pendingViewProj;
+            const float cx = vp[0] * wx + vp[4] * wy + vp[8] * wz + vp[12];
+            const float cy = vp[1] * wx + vp[5] * wy + vp[9] * wz + vp[13];
+            const float cw = vp[3] * wx + vp[7] * wy + vp[11] * wz + vp[15];
+            if (cw > 0.0001f) {
+                sunScreenX = (cx / cw) * 0.5f + 0.5f;
+                sunScreenY = (cy / cw) * 0.5f + 0.5f;
+                if (sunScreenX > 0.0f && sunScreenX < 1.0f && sunScreenY > 0.0f && sunScreenY < 1.0f) {
+                    raysVisible = environment.sunIntensity;
+                }
+            }
+        }
         struct TonemapPush {
             graphics_internal::RectRenderer::PushConstants ui;
             float aa[4];
+            float rays[4];
+            float rays2[4];
+            float bloom[4];
         };
+        // Ray quality follows the preset: light on Low, ultra on High.
+        const float raySamples = activeQuality == Aporia::GraphicsQuality::Low ? 14.0f
+                               : activeQuality == Aporia::GraphicsQuality::Medium ? 36.0f : 72.0f;
         TonemapPush push{};
         push.aa[0] = antiAliasingStrength;
         push.aa[1] = static_cast<float>(antiAliasing);
+        push.rays[0] = sunScreenX;
+        push.rays[1] = sunScreenY;
+        push.rays[2] = 0.18f; // ray strength
+        push.rays[3] = raysVisible;
+        push.rays2[0] = raySamples;
+        push.rays2[1] = 0.95f;  // decay
+        push.rays2[2] = 0.25f;  // warm tint
+        push.rays2[3] = 0.0f;
+        // HDR bloom for scene highlights (Low seeds it, High lets it glow).
+        const float bloomStrength = activeQuality == Aporia::GraphicsQuality::Low ? 0.04f
+                                  : activeQuality == Aporia::GraphicsQuality::Medium ? 0.07f : 0.11f;
+        push.bloom[0] = bloomStrength;
+        push.bloom[1] = 3.0f;  // threshold (above white)
+        push.bloom[2] = 8.0f;  // blur radius in texels
+        push.bloom[3] = 0.0f;
         vkCmdPushConstants(tonemapCb, pipelines.tonemapPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
         vkCmdDraw(tonemapCb, 4, 1, 0, 0);
         vkEndCommandBuffer(tonemapCb);
         haveTonemap = true;
     }
+    
 
     // Sky background: a fullscreen secondary drawn first in the main pass.
     VkCommandBuffer skyCb = secondaryBuffers[slotIndex][kSecondarySky];
@@ -617,6 +809,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         vkEndCommandBuffer(skyCb);
         haveSky = true;
     }
+    
 
     // ---- primary: begin the render passes and execute the secondaries ----
     if (haveReflectMesh) {
@@ -672,16 +865,190 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         vkCmdEndRenderPass(cmd);
     }
 
-    if (useHdr && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA && taa.valid()) {
+    const bool taaActive =
+        useHdr && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA && taa.valid();
+    if (taaActive) {
         taa.record(cmd, hdrDepthImage, taaPrevViewProj, taaInvViewProj, antiAliasingStrength);
     }
 
-    if (useHdr && haveTonemap) {
-        renderTonemap(cmd, targetFramebuffer, width, height);
+#if defined(APORIA_EXPERIMENTAL)
+    // The tonemap pass samples the scene depth for the froxel fog march; TAA
+    // already leaves it readable, otherwise transition it once here.
+    if (useHdr && haveTonemap && hdrDepthImage != VK_NULL_HANDLE && !taaActive) {
+        VkImageMemoryBarrier depthBarrier{};
+        depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        depthBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        depthBarrier.image = hdrDepthImage;
+        depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        depthBarrier.subresourceRange.levelCount = 1;
+        depthBarrier.subresourceRange.layerCount = 1;
+        depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &depthBarrier);
     }
+#endif
+
+    // Separable half-res blur chain, reused for the local glass (source = HDR
+    // scene) and the backdrop (source = the uiTarget composite). One dense pass
+    // per axis; radius sets the sigma and the iteration count widens it.
+    const float blurIterations = std::max(1.0f, static_cast<float>(uiDrawList.blur.iterations));
+    const float blurRadius = std::clamp(uiDrawList.blur.radius * blurIterations * 0.5f, 1.0f, 16.0f);
+    const auto recordBlurPass = [&](VkFramebuffer framebuffer, VkDescriptorSet descriptor,
+                                    float dirX, float dirY) {
+        std::array<VkClearValue, 2> blurClear{};
+        blurClear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        blurClear[1].depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = hdrRenderPass;
+        begin.framebuffer = framebuffer;
+        begin.renderArea.extent = {blurWidth, blurHeight};
+        begin.clearValueCount = static_cast<std::uint32_t>(blurClear.size());
+        begin.pClearValues = blurClear.data();
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        VkViewport viewport{};
+        viewport.width = static_cast<float>(blurWidth);
+        viewport.height = static_cast<float>(blurHeight);
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        VkRect2D scissor{};
+        scissor.extent = {blurWidth, blurHeight};
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.blurPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.tonemapPipelineLayout,
+                                0, 1, &descriptor, 0, nullptr);
+        // One target texel along the axis (both separable passes write half-res),
+        // so the source's own resolution never biases the sample positions.
+        const float push[4] = {
+            dirX / static_cast<float>(blurWidth > 0 ? blurWidth : 1),
+            dirY / static_cast<float>(blurHeight > 0 ? blurHeight : 1),
+            blurRadius, 0.0f};
+        vkCmdPushConstants(cmd, pipelines.tonemapPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(push), push);
+        vkCmdDraw(cmd, 4, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    };
+    const auto imageBarrier = [&](VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
+                                  VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+                                  VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = newLayout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.srcAccessMask = srcAccess;
+        barrier.dstAccessMask = dstAccess;
+        vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    };
+    const auto recordBlurChain = [&](VkDescriptorSet source) {
+        recordBlurPass(blurA.framebuffer, source, 1.0f, 0.0f);
+        imageBarrier(blurA.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        recordBlurPass(blurB.framebuffer, blurASet, 0.0f, 1.0f);
+        imageBarrier(blurB.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    };
+
+    if (backdrop) {
+        graphics_internal::HdrRenderer::TonemapContext targetContext;
+        targetContext.commandBuffer = cmd;
+        targetContext.renderPass = renderPass;
+        // 1. tonemapped scene into the composite target (clears it).
+        if (haveTonemap) {
+            graphics_internal::HdrRenderer::renderTonemap(targetContext, uiTarget.framebuffer, width, height,
+                                                          &tonemapCb, 1);
+        }
+        imageBarrier(uiTarget.image,
+                     headless ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        // 2. bottom to top: blur the composite so far, then draw this layer onto
+        //    it - glass rects sample the blurred composite (capturing every layer
+        //    below), text stays sharp.
+        for (std::uint32_t layerIndex = 0; layerIndex < Aporia::kUiLayerCount; ++layerIndex) {
+            const Aporia::UiLayer layer = static_cast<Aporia::UiLayer>(layerIndex);
+            const Aporia::UiDrawList& bucket = layerStack.bucket(layer);
+            if (bucket.roundedRects.empty() && bucket.textRuns.empty()) {
+                continue;
+            }
+            VkDescriptorSet sceneSet = tonemapDescriptorSet;
+            if (!bucket.roundedRects.empty() && uiBlurActive) {
+                imageBarrier(uiTarget.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                recordBlurChain(uiTargetSet);
+                sceneSet = blurBSet;
+                imageBarrier(uiTarget.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            }
+            VkRenderPassBeginInfo appendBegin{};
+            appendBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            appendBegin.renderPass = uiAppendRenderPass;
+            appendBegin.framebuffer = uiAppendFramebuffer;
+            appendBegin.renderArea.extent = {width, height};
+            vkCmdBeginRenderPass(cmd, &appendBegin, VK_SUBPASS_CONTENTS_INLINE);
+            VkViewport appendViewport{};
+            appendViewport.width = static_cast<float>(width);
+            appendViewport.height = static_cast<float>(height);
+            appendViewport.maxDepth = 1.0f;
+            vkCmdSetViewport(cmd, 0, 1, &appendViewport);
+            VkRect2D appendScissor{};
+            appendScissor.extent = {width, height};
+            vkCmdSetScissor(cmd, 0, 1, &appendScissor);
+            if (!bucket.roundedRects.empty() && pipelines.uiPipeline != VK_NULL_HANDLE) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.uiPipeline);
+                if (sceneSet != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            pipelines.tonemapPipelineLayout, 0u, 1u, &sceneSet, 0u, nullptr);
+                }
+                rectRenderer.draw(cmd, pipelines.tonemapPipelineLayout, width, height, bucket);
+            }
+            if (!bucket.textRuns.empty()) {
+                drawUiTextLayer(cmd, layer);
+            }
+            vkCmdEndRenderPass(cmd);
+        }
+        imageBarrier(uiTarget.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        if (havePresent) {
+            graphics_internal::HdrRenderer::renderTonemap(targetContext, targetFramebuffer, width, height,
+                                                          &presentCb, 1);
+        }
+    } else {
+        if (uiBlurActive) {
+            imageBarrier(hdrImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            recordBlurChain(tonemapDescriptorSet);
+        }
+        if (useHdr && haveTonemap) {
+            renderTonemap(cmd, targetFramebuffer, width, height);
+        }
+    }
+    
 
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         setError("vkEndCommandBuffer failed");
+        
         return false;
     }
 #if defined(APORIA_EXPERIMENTAL)
@@ -689,6 +1056,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         jobs->waitAll();
     }
 #endif
+    
     return true;
 }
 
@@ -870,3 +1238,4 @@ bool Graphics::Impl::recreateSwapchain() noexcept {
 }
 
 } // namespace Aporia
+

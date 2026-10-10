@@ -408,8 +408,7 @@ std::vector<TextGlyph> TextRenderer::layoutText(
     return glyphs;
 }
 
-void TextRenderer::renderText(
-        VkCommandBuffer commandBuffer,
+void TextRenderer::uploadText(
         std::uint32_t frameSlot,
         float screenWidth,
         float screenHeight,
@@ -418,7 +417,7 @@ void TextRenderer::renderText(
         const TextColor& outlineColor,
         const std::vector<TextGlyph>& glyphs,
         std::uint64_t signature) noexcept {
-    if (commandBuffer == VK_NULL_HANDLE || glyphs.empty() || device_ == VK_NULL_HANDLE) {
+    if (glyphs.empty() || device_ == VK_NULL_HANDLE) {
         return;
     }
     Slot& slot = slots_[frameSlot % SlotCount];
@@ -449,12 +448,43 @@ void TextRenderer::renderText(
                     glyphs.data(), count * sizeof(TextGlyph));
         slot.uploadedSignature = signature;
     }
+}
 
+void TextRenderer::drawTextRange(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t frameSlot,
+        std::uint32_t firstGlyph,
+        std::uint32_t glyphCount) noexcept {
+    if (commandBuffer == VK_NULL_HANDLE || glyphCount == 0 || device_ == VK_NULL_HANDLE) {
+        return;
+    }
+    Slot& slot = slots_[frameSlot % SlotCount];
+    if (slot.mapped == nullptr) {
+        return;
+    }
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       mode_ == Mode::Ttf ? ttfPipeline_ : msdfPipeline_);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
                             0, 1, &slot.descriptorSet, 0, nullptr);
-    vkCmdDraw(commandBuffer, static_cast<std::uint32_t>(count) * 6, 1, 0, 0);
+    vkCmdDraw(commandBuffer, glyphCount * 6, 1, firstGlyph * 6, 0);
+}
+
+void TextRenderer::renderText(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t frameSlot,
+        float screenWidth,
+        float screenHeight,
+        float guiScale,
+        float outlineWidth,
+        const TextColor& outlineColor,
+        const std::vector<TextGlyph>& glyphs,
+        std::uint64_t signature) noexcept {
+    if (commandBuffer == VK_NULL_HANDLE || glyphs.empty() || device_ == VK_NULL_HANDLE) {
+        return;
+    }
+    const std::size_t count = glyphs.size() < MaxGlyphs ? glyphs.size() : MaxGlyphs;
+    uploadText(frameSlot, screenWidth, screenHeight, guiScale, outlineWidth, outlineColor, glyphs, signature);
+    drawTextRange(commandBuffer, frameSlot, 0, static_cast<std::uint32_t>(count));
 }
 
 } // namespace Aporia::graphics_internal

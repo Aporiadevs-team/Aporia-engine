@@ -372,19 +372,28 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
     if (!loadShaderModule(device, shaderDirectory + "/tonemap.vert.spv", "tonemap vertex", out.tonemapVertexShader, error) ||
         !loadShaderModule(device, shaderDirectory + "/tonemap.frag.spv", "tonemap fragment", out.tonemapFragmentShader, error) ||
         !loadShaderModule(device, shaderDirectory + "/taa.frag.spv", "taa fragment", out.taaFragmentShader, error) ||
-        !loadShaderModule(device, shaderDirectory + "/ui.frag.spv", "ui fragment", out.uiFragmentShader, error)) {
+        !loadShaderModule(device, shaderDirectory + "/ui.frag.spv", "ui fragment", out.uiFragmentShader, error) ||
+        !loadShaderModule(device, shaderDirectory + "/blur.frag.spv", "blur fragment", out.blurFragmentShader, error)) {
         return false;
     }
 
-    VkDescriptorSetLayoutBinding hdrSamplerBinding{};
-    hdrSamplerBinding.binding = 0;
-    hdrSamplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    hdrSamplerBinding.descriptorCount = 1;
-    hdrSamplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // 0 = HDR color, 1 = scene depth (for volumetric ray marching), 2 = sun
+    // shadow map, 3 = volumetric parameters.
+    VkDescriptorSetLayoutBinding tonemapBindings[4]{};
+    for (int index = 0; index < 3; ++index) {
+        tonemapBindings[index].binding = static_cast<std::uint32_t>(index);
+        tonemapBindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        tonemapBindings[index].descriptorCount = 1;
+        tonemapBindings[index].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    tonemapBindings[3].binding = 3;
+    tonemapBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    tonemapBindings[3].descriptorCount = 1;
+    tonemapBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo tonemapLayoutInfo{};
     tonemapLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    tonemapLayoutInfo.bindingCount = 1;
-    tonemapLayoutInfo.pBindings = &hdrSamplerBinding;
+    tonemapLayoutInfo.bindingCount = 4;
+    tonemapLayoutInfo.pBindings = tonemapBindings;
     if (vkCreateDescriptorSetLayout(device, &tonemapLayoutInfo, nullptr, &out.tonemapDescriptorLayout) != VK_SUCCESS) {
         error = "vkCreateDescriptorSetLayout(tonemap) failed";
         return false;
@@ -396,21 +405,25 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
     VkPushConstantRange tonemapPushRange{};
     tonemapPushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     tonemapPushRange.offset = 0;
-    tonemapPushRange.size = sizeof(RectRenderer::PushConstants) + 16;
+    tonemapPushRange.size = sizeof(RectRenderer::PushConstants) + 16 + 16 + 16 + 16; // AA + ray + ray2 + bloom
     tonemapPipelineLayoutInfo.pushConstantRangeCount = 1;
     tonemapPipelineLayoutInfo.pPushConstantRanges = &tonemapPushRange;
     if (vkCreatePipelineLayout(device, &tonemapPipelineLayoutInfo, nullptr, &out.tonemapPipelineLayout) != VK_SUCCESS) {
         error = "vkCreatePipelineLayout(tonemap) failed";
         return false;
     }
-    VkDescriptorPoolSize tonemapPoolSize{};
-    tonemapPoolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    tonemapPoolSize.descriptorCount = 1;
+    VkDescriptorPoolSize tonemapPoolSizes[2]{};
+    tonemapPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    // Three sets (tonemap + two blur-chain sets) share the 4-binding tonemap
+    // layout, so each allocation consumes 3 samplers + 1 UBO.
+    tonemapPoolSizes[0].descriptorCount = 12;
+    tonemapPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    tonemapPoolSizes[1].descriptorCount = 4;
     VkDescriptorPoolCreateInfo tonemapPoolInfo{};
     tonemapPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    tonemapPoolInfo.maxSets = 1;
-    tonemapPoolInfo.poolSizeCount = 1;
-    tonemapPoolInfo.pPoolSizes = &tonemapPoolSize;
+    tonemapPoolInfo.maxSets = 4; // tonemap + blurA + blurB + backdrop source
+    tonemapPoolInfo.poolSizeCount = 2;
+    tonemapPoolInfo.pPoolSizes = tonemapPoolSizes;
     if (vkCreateDescriptorPool(device, &tonemapPoolInfo, nullptr, &out.tonemapDescriptorPool) != VK_SUCCESS) {
         error = "vkCreateDescriptorPool(tonemap) failed";
         return false;
@@ -483,6 +496,35 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
         return false;
     }
 
+    // Blur pipeline: fullscreen quad sampling the HDR scene into an offscreen
+    // HDR target. It shares the tonemap vertex shader/layout but writes the raw
+    // (untonemapped, linear) result with no colour blending, and renders into the
+    // HDR render pass so the half-res blur targets can reuse its attachment
+    // format/depth setup.
+    if (context.hdrRenderPass != VK_NULL_HANDLE) {
+        VkPipelineShaderStageCreateInfo blurStages[2]{};
+        blurStages[0] = tonemapStages[0];
+        blurStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        blurStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        blurStages[1].module = out.blurFragmentShader;
+        blurStages[1].pName = "main";
+        VkGraphicsPipelineCreateInfo blurPipelineInfo = tonemapPipelineInfo;
+        blurPipelineInfo.pStages = blurStages;
+        blurPipelineInfo.renderPass = context.hdrRenderPass;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &blurPipelineInfo, nullptr, &out.blurPipeline) != VK_SUCCESS) {
+            error = "vkCreateGraphicsPipelines(blur) failed";
+            return false;
+        }
+        // Same shader, final (non-HDR) render pass: presents the composite to the
+        // screen for the layered backdrop.
+        VkGraphicsPipelineCreateInfo presentPipelineInfo = blurPipelineInfo;
+        presentPipelineInfo.renderPass = context.renderPass;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &presentPipelineInfo, nullptr, &out.blurPresentPipeline) != VK_SUCCESS) {
+            error = "vkCreateGraphicsPipelines(blur present) failed";
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -537,6 +579,9 @@ void destroyPipelines(VkDevice device, PipelineSet& p) noexcept {
     destroyModule(p.taaFragmentShader);
     destroyPipeline(p.uiPipeline);
     destroyModule(p.uiFragmentShader);
+    destroyPipeline(p.blurPipeline);
+    destroyPipeline(p.blurPresentPipeline);
+    destroyModule(p.blurFragmentShader);
     destroyModule(p.vertexShader);
     destroyModule(p.fragmentShader);
 }

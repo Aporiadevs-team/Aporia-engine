@@ -23,6 +23,7 @@ RectRenderer::PushConstants makePushConstants(
     push.radius[2] = radius;
     push.radius[3] = radius;
     push.smoothing[0] = 1.0f;
+    push.smoothing[1] = blur.displaySpaceSource ? 1.0f : 0.0f;
     push.blur[0] = static_cast<float>(blur.mode);
     push.blur[1] = blur.radius;
     push.blur[2] = blur.intensity;
@@ -75,5 +76,7 @@ void RectRenderer::draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipeline
         }
     }
 }
+
+
 
 } // namespace Aporia::graphics_internal

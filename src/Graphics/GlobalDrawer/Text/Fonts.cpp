@@ -1,10 +1,12 @@
 #include "Graphics/GlobalDrawer/GraphicsImpl.hpp"
 
+#include <cstdio>
 #include <string>
 
 namespace Aporia {
 
 FontHandle Graphics::createFontFromTtf(const std::string& ttfPath, float pixelSize) {
+    
     if (!impl_) {
         return invalidFontHandle;
     }
@@ -15,6 +17,7 @@ FontHandle Graphics::createFontFromTtf(const std::string& ttfPath, float pixelSi
     std::string error;
     const FontHandle handle = impl_->fontStore.createFromTtf(
         ttfPath, pixelSize, impl_->textureStore, impl_->scene, error);
+    
     if (!handle.valid()) {
         impl_->setError(error);
     }
@@ -47,6 +50,17 @@ void Graphics::destroyFont(FontHandle handle) noexcept {
 
 bool Graphics::fontValid(FontHandle handle) const noexcept {
     return impl_ != nullptr && impl_->fontStore.valid(handle);
+}
+
+float Graphics::measureText(FontHandle handle, std::string_view text, float size) const {
+    if (impl_ == nullptr || !handle.valid()) {
+        return 0.0f;
+    }
+    const graphics_internal::FontStore::Resource* resource = impl_->fontStore.find(handle);
+    if (resource == nullptr) {
+        return 0.0f;
+    }
+    return impl_->textRenderer.measureText(resource->atlas, text, size);
 }
 
 } // namespace Aporia

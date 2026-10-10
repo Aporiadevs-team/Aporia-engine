@@ -266,6 +266,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     const graphics_internal::MeshStore::Device meshDevice{
         impl_->device, impl_->memoryProperties, impl_->commandBuffer, impl_->queue};
     impl_->meshStore.setDevice(meshDevice);
+    
     impl_->textureStore.setDevice({impl_->device, impl_->physicalDevice, impl_->memoryProperties,
                                    impl_->commandBuffer, impl_->queue});
     impl_->QualityTargets::setDevice({impl_->device, impl_->physicalDevice, impl_->memoryProperties,
@@ -346,7 +347,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         return false;
     }
 
-    {
+    if (config.sky) {
         std::string skyError;
         if (!impl_->sky.initialize(impl_->device, impl_->memoryProperties, impl_->renderPass,
                                    impl_->hdrRenderPass, shaderDirectory, skyError)) {
@@ -355,6 +356,20 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
             return false;
         }
     }
+
+#if defined(APORIA_EXPERIMENTAL)
+    {
+        std::string volumetricError;
+        if (!impl_->volumetric.initialize(
+                {impl_->device, impl_->physicalDevice, impl_->memoryProperties,
+                 impl_->commandBuffer, impl_->queue},
+                shaderDirectory, impl_->shadow.view, impl_->shadow.sampler, volumetricError)) {
+            impl_->setError(volumetricError);
+            shutdown();
+            return false;
+        }
+    }
+#endif
 
     if (!impl_->rebuildQualityTargets()) {
         shutdown();
@@ -407,6 +422,7 @@ void Graphics::Impl::destroy() noexcept {
         taa.shutdown();
         scene.destroyLayout(device);
 #if defined(APORIA_EXPERIMENTAL)
+        volumetric.destroy();
         materialStore.release(device);
 #endif
         if (renderPass != VK_NULL_HANDLE) {

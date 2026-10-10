@@ -31,9 +31,9 @@ vec3 displaySample(vec2 uv) {
 }
 
 void main() {
-    vec2 texel = 1.0 / vec2(textureSize(hdrTexture, 0));
-    vec2 screen = vec2(textureSize(hdrTexture, 0));
-    vec2 fragPos = fragUv * screen;
+    // Window-space position (top-left origin). Not textureSize(): with blur live,
+    // binding 0 is the half-res target and would halve the coordinate space.
+    vec2 fragPos = gl_FragCoord.xy;
 
     vec2 center = ui.rect.xy + ui.rect.zw * 0.5;
     vec2 halfSize = ui.rect.zw * 0.5;
@@ -55,26 +55,10 @@ void main() {
     vec3 color = ui.color.rgb;
     float alpha = ui.color.a * coverage;
     if (ui.blur.x > 0.5) {
-        // Panel shows the scene behind it, optionally blurred, tinted by the
-        // panel color, then composited with straight alpha.
-        vec3 scene = displaySample(fragUv);
-        vec3 blurred = scene;
-        float blurRadius = max(ui.blur.y, 1.0);
-        vec2 o = texel * blurRadius;
-        if (ui.blur.x < 1.5) {
-            blurred = (displaySample(fragUv + vec2(o.x, o.y)) +
-                       displaySample(fragUv + vec2(-o.x, o.y)) +
-                       displaySample(fragUv + vec2(o.x, -o.y)) +
-                       displaySample(fragUv + vec2(-o.x, -o.y)) +
-                       scene) / 5.0;
-        } else {
-            blurred = scene * 0.227027;
-            blurred += displaySample(fragUv + vec2(o.x, 0.0)) * 0.1945946;
-            blurred += displaySample(fragUv - vec2(o.x, 0.0)) * 0.1945946;
-            blurred += displaySample(fragUv + vec2(0.0, o.y)) * 0.1945946;
-            blurred += displaySample(fragUv - vec2(0.0, o.y)) * 0.1945946;
-        }
-        blurred = mix(scene, blurred, clamp(ui.blur.z, 0.0, 1.0));
+        // smoothing.y: 0 = linear HDR blur (tonemap it), 1 = display-space composite.
+        vec3 blurred = ui.smoothing.y > 0.5
+            ? texture(hdrTexture, clamp(fragUv, 0.0, 1.0)).rgb
+            : displaySample(fragUv);
         color = mix(blurred, ui.color.rgb, ui.color.a);
         alpha = coverage;
     }

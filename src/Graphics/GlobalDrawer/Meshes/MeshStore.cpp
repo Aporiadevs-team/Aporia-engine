@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 namespace Aporia::graphics_internal {
@@ -39,6 +40,7 @@ bool MeshStore::createBufferWithData(
 }
 
 MeshHandle MeshStore::create(const MeshData& data, std::string& error) {
+    
     if (data.vertices.empty() || data.indices.empty()) {
         error = "Mesh data must contain vertices and indices";
         return invalidMeshHandle;

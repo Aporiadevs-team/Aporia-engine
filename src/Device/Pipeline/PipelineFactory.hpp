@@ -42,11 +42,14 @@ struct PipelineSet {
     VkShaderModule tonemapFragmentShader = VK_NULL_HANDLE;
     VkShaderModule taaFragmentShader = VK_NULL_HANDLE;
     VkShaderModule uiFragmentShader = VK_NULL_HANDLE;
+    VkShaderModule blurFragmentShader = VK_NULL_HANDLE;
     VkDescriptorSetLayout tonemapDescriptorLayout = VK_NULL_HANDLE;
     VkPipelineLayout tonemapPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorPool tonemapDescriptorPool = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline uiPipeline = VK_NULL_HANDLE;
+    VkPipeline blurPipeline = VK_NULL_HANDLE;
+    VkPipeline blurPresentPipeline = VK_NULL_HANDLE;
 };
 
 // Inputs gather every dependency the pipelines need to be created. All handles

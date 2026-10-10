@@ -18,6 +18,14 @@ struct RenderPassFactory {
         VkFormat depthFormat,
         VkImageLayout colorFinalLayout,
         VkRenderPass& outRenderPass) noexcept;
+
+    // Append variant: colour is loaded (not cleared) and left sampleable, so a
+    // composite target can be blurred and then have more UI drawn onto it.
+    static bool createLoad(
+        VkDevice device,
+        VkFormat colorFormat,
+        VkFormat depthFormat,
+        VkRenderPass& outRenderPass) noexcept;
 };
 
 } // namespace Aporia::graphics_internal

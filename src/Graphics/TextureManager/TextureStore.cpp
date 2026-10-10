@@ -11,6 +11,7 @@
 
 #include "Graphics/GlobalDrawer/Support/Support.hpp"
 
+#include <cstdio>
 #include <limits>
 #include <utility>
 
@@ -209,6 +210,7 @@ bool TextureStore::bind(TextureHandle handle, SceneBindings& scene, std::string&
 }
 
 TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings& scene, std::string& error) {
+    
     if (nextTextureId_ == 0) {
         error = "Texture handle space is exhausted";
         return invalidTextureHandle;
@@ -216,8 +218,10 @@ TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings
 
     Resource texture;
     if (!createResource(description, texture, error)) {
+        
         return invalidTextureHandle;
     }
+    
 
     const std::uint64_t id = nextTextureId_++;
     if (textures_.find(id) != textures_.end()) {
@@ -246,6 +250,7 @@ TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings
 
     const TextureHandle handle{id};
     if (!bind(handle, scene, error)) {
+        
         const auto textureIt = textures_.find(id);
         if (textureIt != textures_.end()) {
             TextureManager::destroyResource(device_.device, textureIt->second);
@@ -253,6 +258,7 @@ TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings
         }
         return invalidTextureHandle;
     }
+    
     return handle;
 }
 

@@ -245,11 +245,31 @@ enum class AntiAliasingMode : std::uint8_t {
     TAA = 2,
 };
 
+// Experimental UI compositing order (the 2D "z-buffer"). Every UI element is
+// tagged with a layer; the engine flattens rectangles and text into one ordered
+// stream and draws it low-to-high, interleaving the rect and text pipelines by
+// layer instead of always drawing all rects then all text.
+//   BeforeWorld - behind the 3D world (background panels)
+//   World       - at the world level
+//   Hud         - the scene HUD (default; preserves the old behaviour)
+//   Gui         - popups above the HUD but below the top overlay
+//   Overlay     - always on top (menus, tooltips, modal dialogs)
+enum class UiLayer : std::uint8_t {
+    BeforeWorld = 0,
+    World = 1,
+    Hud = 2,
+    Gui = 3,
+    Overlay = 4,
+};
+
+inline constexpr std::uint32_t kUiLayerCount = 5;
+
 struct UiRect {
     float x = 0.0f;
     float y = 0.0f;
     float width = 0.0f;
     float height = 0.0f;
+    UiLayer layer = UiLayer::Hud;
 };
 
 struct UiColor {
@@ -270,6 +290,10 @@ struct BlurConfig {
     std::uint32_t iterations = 2;
     float radius = 4.0f;
     float intensity = 1.0f;
+    // Experimental: the glass samples an already display-space composite (the
+    // layered backdrop) instead of the linear HDR scene, so the blur is not
+    // tonemapped a second time.
+    bool displaySpaceSource = false;
 };
 
 enum class UiTextAtlasMode : std::uint8_t {
@@ -308,6 +332,7 @@ struct UiTextRun {
     UiColor color{};
     float outlineWidth = 0.0f;
     UiColor outlineColor{};
+    UiLayer layer = UiLayer::Hud;
 };
 
 struct UiDrawList {
@@ -317,6 +342,12 @@ struct UiDrawList {
     FontHandle font{};
     float cornerRadius = 0.0f;
     BlurConfig blur{};
+    // Experimental: when true the engine composits the scene plus every UI layer
+    // below the topmost one, blurs that backdrop, and draws the topmost layer
+    // (sharp) over the blurred composite. This is the "modal overlay blurs the
+    // layers below it" mode; the top layer's own glass rects are drawn plain
+    // because the backdrop is already blurred.
+    bool backdropBlur = false;
 };
 
 struct GraphicsConfig {
@@ -336,6 +367,9 @@ struct GraphicsConfig {
     AntiAliasingMode antiAliasing = AntiAliasingMode::SMAA;
     float antiAliasingStrength = 0.75f; // 0 = off, 1 = full blend
     BlurConfig blur{};
+    // Procedural sky background. Off by default: the host draws its own backdrop
+    // unless it opts in.
+    bool sky = false;
 };
 
 struct GraphicsStats {
@@ -501,6 +535,9 @@ public:
     FontHandle createFontFromMsdf(const std::string& jsonPath, const std::string& pngPath);
     void destroyFont(FontHandle handle) noexcept;
     [[nodiscard]] bool fontValid(FontHandle handle) const noexcept;
+    // Width in pixels of `text` laid out at `size` with the given font (0 if
+    // the font is unknown). Useful for centering UI text inside a rectangle.
+    [[nodiscard]] float measureText(FontHandle handle, std::string_view text, float size) const;
 
     [[nodiscard]] GraphicsStats stats() const noexcept;
     [[nodiscard]] const std::string& lastError() const noexcept;

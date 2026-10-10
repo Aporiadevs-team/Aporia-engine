@@ -10,6 +10,7 @@
 #include "QualityTargets.hpp"
 
 #include "Device/Init/RenderPass.hpp"
+#include "Device/MemoryManager/MemoryManager.hpp"
 #include "Device/SceneManager/Color/ColorTarget.hpp"
 #include "Device/SceneManager/Depth/DepthTarget.hpp"
 #include "Graphics/GlobalDrawer/Support/Support.hpp"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace Aporia::graphics_internal {
 
@@ -236,6 +238,86 @@ bool QualityTargets::rebuild(const RebuildContext& rebuildContext, std::string& 
         hdrDescriptor.sampler = hdrSampler;
         hdrDescriptor.imageView = hdrView;
         hdrDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+#if defined(APORIA_EXPERIMENTAL)
+        // Froxel fog inputs: a nearest depth sampler, the integration UBO and the
+        // grid view produced by VolumetricRenderer.
+        if (tonemapDepthSampler == VK_NULL_HANDLE) {
+            VkSamplerCreateInfo depthSamplerInfo{};
+            depthSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            depthSamplerInfo.magFilter = VK_FILTER_NEAREST;
+            depthSamplerInfo.minFilter = VK_FILTER_NEAREST;
+            depthSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            depthSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            depthSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            depthSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            depthSamplerInfo.maxLod = 0.0f;
+            if (vkCreateSampler(gpu.device, &depthSamplerInfo, nullptr, &tonemapDepthSampler) != VK_SUCCESS) {
+                error = "vkCreateSampler(tonemap depth) failed";
+                return false;
+            }
+        }
+        if (tonemapVolumetricBuffer == VK_NULL_HANDLE) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = sizeof(VolumetricUniforms);
+            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (vkCreateBuffer(gpu.device, &bufferInfo, nullptr, &tonemapVolumetricBuffer) != VK_SUCCESS) {
+                error = "vkCreateBuffer(tonemap volumetric) failed";
+                return false;
+            }
+            VkMemoryRequirements requirements{};
+            vkGetBufferMemoryRequirements(gpu.device, tonemapVolumetricBuffer, &requirements);
+            std::uint32_t memoryType = 0;
+            if (!MemoryManager::findMemoryType(gpu.memoryProperties, requirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, memoryType)) {
+                error = "No host-visible memory for the tonemap volumetric buffer";
+                return false;
+            }
+            VkMemoryAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocateInfo.allocationSize = requirements.size;
+            allocateInfo.memoryTypeIndex = memoryType;
+            if (vkAllocateMemory(gpu.device, &allocateInfo, nullptr, &tonemapVolumetricMemory) != VK_SUCCESS ||
+                vkBindBufferMemory(gpu.device, tonemapVolumetricBuffer, tonemapVolumetricMemory, 0) != VK_SUCCESS) {
+                error = "vkAllocateMemory(tonemap volumetric) failed";
+                return false;
+            }
+        }
+        VkDescriptorImageInfo depthDescriptor{};
+        depthDescriptor.sampler = tonemapDepthSampler;
+        depthDescriptor.imageView = hdrDepthView;
+        // The scene depth is transitioned to SHADER_READ_ONLY before the tonemap
+        // pass (by TAA, or by the explicit barrier in Frame when TAA is off).
+        depthDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo froxelDescriptor{};
+        froxelDescriptor.sampler = ctx.froxelSampler;
+        froxelDescriptor.imageView = ctx.froxelView;
+        froxelDescriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorBufferInfo volumetricBuffer{};
+        volumetricBuffer.buffer = tonemapVolumetricBuffer;
+        volumetricBuffer.offset = 0;
+        volumetricBuffer.range = sizeof(VolumetricUniforms);
+        std::array<VkWriteDescriptorSet, 4> writes{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = tonemapDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].descriptorCount = 1;
+        writes[0].pImageInfo = &hdrDescriptor;
+        writes[1] = writes[0];
+        writes[1].dstBinding = 1;
+        writes[1].pImageInfo = &depthDescriptor;
+        writes[2] = writes[0];
+        writes[2].dstBinding = 2;
+        writes[2].pImageInfo = &froxelDescriptor;
+        writes[3] = writes[0];
+        writes[3].dstBinding = 3;
+        writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[3].pImageInfo = nullptr;
+        writes[3].pBufferInfo = &volumetricBuffer;
+        vkUpdateDescriptorSets(gpu.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+#else
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet = tonemapDescriptorSet;
@@ -244,6 +326,168 @@ bool QualityTargets::rebuild(const RebuildContext& rebuildContext, std::string& 
         write.descriptorCount = 1;
         write.pImageInfo = &hdrDescriptor;
         vkUpdateDescriptorSets(gpu.device, 1, &write, 0, nullptr);
+#endif
+
+        // Half-res separable blur chain for the UI glass (see QualityTargets.hpp).
+        const std::uint32_t blurW = std::max(1u, mainWidth / 2);
+        const std::uint32_t blurH = std::max(1u, mainHeight / 2);
+        if (!createColorTarget(
+                ctx.depthFormat,
+                hdrFormat,
+                0,
+                blurW,
+                blurH,
+                hdrRenderPass,
+                blurA.view,
+                blurA.framebuffer,
+                blurA.image,
+                blurA.memory,
+                blurA.depthView,
+                blurA.depthImage,
+                blurA.depthMemory,
+                error) ||
+            !createColorTarget(
+                ctx.depthFormat,
+                hdrFormat,
+                0,
+                blurW,
+                blurH,
+                hdrRenderPass,
+                blurB.view,
+                blurB.framebuffer,
+                blurB.image,
+                blurB.memory,
+                blurB.depthView,
+                blurB.depthImage,
+                blurB.depthMemory,
+                error)) {
+            return false;
+        }
+        blurWidth = blurW;
+        blurHeight = blurH;
+
+        VkSamplerCreateInfo blurSamplerInfo{};
+        blurSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        blurSamplerInfo.magFilter = VK_FILTER_LINEAR;
+        blurSamplerInfo.minFilter = VK_FILTER_LINEAR;
+        blurSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        blurSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        blurSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        blurSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        blurSamplerInfo.maxLod = 1.0f;
+        if (vkCreateSampler(gpu.device, &blurSamplerInfo, nullptr, &blurSampler) != VK_SUCCESS) {
+            error = "vkCreateSampler(blur) failed";
+            return false;
+        }
+
+        VkDescriptorSetAllocateInfo blurAllocate{};
+        blurAllocate.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        blurAllocate.descriptorPool = ctx.tonemapDescriptorPool;
+        blurAllocate.descriptorSetCount = 1;
+        blurAllocate.pSetLayouts = &ctx.tonemapDescriptorLayout;
+        if (vkAllocateDescriptorSets(gpu.device, &blurAllocate, &blurASet) != VK_SUCCESS ||
+            vkAllocateDescriptorSets(gpu.device, &blurAllocate, &blurBSet) != VK_SUCCESS) {
+            error = "vkAllocateDescriptorSets(blur) failed";
+            return false;
+        }
+        VkDescriptorImageInfo blurADescriptor{};
+        blurADescriptor.sampler = blurSampler;
+        blurADescriptor.imageView = blurA.view;
+        blurADescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo blurBDescriptor{};
+        blurBDescriptor.sampler = blurSampler;
+        blurBDescriptor.imageView = blurB.view;
+        blurBDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet blurWrites[2]{};
+        blurWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        blurWrites[0].dstSet = blurASet;
+        blurWrites[0].dstBinding = 0;
+        blurWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        blurWrites[0].descriptorCount = 1;
+        blurWrites[0].pImageInfo = &blurADescriptor;
+        blurWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        blurWrites[1].dstSet = blurBSet;
+        blurWrites[1].dstBinding = 0;
+        blurWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        blurWrites[1].descriptorCount = 1;
+        blurWrites[1].pImageInfo = &blurBDescriptor;
+        vkUpdateDescriptorSets(gpu.device, 2, blurWrites, 0, nullptr);
+
+        // Backdrop composite target (full-res, same format as the final target).
+        if (!createColorTarget(
+                ctx.depthFormat, ctx.colorFormat, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                mainWidth, mainHeight, ctx.mainRenderPass,
+                uiTarget.view, uiTarget.framebuffer, uiTarget.image, uiTarget.memory,
+                uiTarget.depthView, uiTarget.depthImage, uiTarget.depthMemory, error)) {
+            return false;
+        }
+        if (vkAllocateDescriptorSets(gpu.device, &blurAllocate, &uiTargetSet) != VK_SUCCESS) {
+            error = "vkAllocateDescriptorSets(uiTarget) failed";
+            return false;
+        }
+        VkDescriptorImageInfo uiTargetDescriptor{};
+        uiTargetDescriptor.sampler = blurSampler;
+        uiTargetDescriptor.imageView = uiTarget.view;
+        uiTargetDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet uiTargetWrite{};
+        uiTargetWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        uiTargetWrite.dstSet = uiTargetSet;
+        uiTargetWrite.dstBinding = 0;
+        uiTargetWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        uiTargetWrite.descriptorCount = 1;
+        uiTargetWrite.pImageInfo = &uiTargetDescriptor;
+        vkUpdateDescriptorSets(gpu.device, 1, &uiTargetWrite, 0, nullptr);
+
+        if (!RenderPassFactory::createLoad(gpu.device, ctx.colorFormat, ctx.depthFormat, uiAppendRenderPass)) {
+            error = "vkCreateRenderPass(ui append) failed";
+            return false;
+        }
+        VkImageView appendAttachments[2] = {uiTarget.view, uiTarget.depthView};
+        VkFramebufferCreateInfo appendInfo{};
+        appendInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        appendInfo.renderPass = uiAppendRenderPass;
+        appendInfo.attachmentCount = 2;
+        appendInfo.pAttachments = appendAttachments;
+        appendInfo.width = mainWidth;
+        appendInfo.height = mainHeight;
+        appendInfo.layers = 1;
+        if (vkCreateFramebuffer(gpu.device, &appendInfo, nullptr, &uiAppendFramebuffer) != VK_SUCCESS) {
+            error = "vkCreateFramebuffer(ui append) failed";
+            return false;
+        }
+    } else {
+        // Non-HDR presets still draw UI with the uiPipeline, which shares the
+        // tonemap descriptor layout. Allocate its set with a valid binding 0 (the
+        // default texture) so the draws have a compatible set 0 bound.
+        const auto& storeTextures = ctx.textures->resources();
+        const auto defaultIt = storeTextures.find(ctx.textures->defaultHandle().value());
+        const auto boundIt = storeTextures.find(ctx.textures->boundHandle().value());
+        if (defaultIt == storeTextures.end() && boundIt == storeTextures.end()) {
+            error = "No texture available for the UI descriptor set";
+            return false;
+        }
+        const auto& uiTexture = boundIt != storeTextures.end() ? boundIt->second : defaultIt->second;
+        VkDescriptorSetAllocateInfo allocateSetInfo{};
+        allocateSetInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateSetInfo.descriptorPool = ctx.tonemapDescriptorPool;
+        allocateSetInfo.descriptorSetCount = 1;
+        allocateSetInfo.pSetLayouts = &ctx.tonemapDescriptorLayout;
+        if (vkAllocateDescriptorSets(gpu.device, &allocateSetInfo, &tonemapDescriptorSet) != VK_SUCCESS) {
+            error = "vkAllocateDescriptorSets(ui) failed";
+            return false;
+        }
+        VkDescriptorImageInfo uiDescriptor{};
+        uiDescriptor.sampler = uiTexture.sampler;
+        uiDescriptor.imageView = uiTexture.view;
+        uiDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet uiWrite{};
+        uiWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        uiWrite.dstSet = tonemapDescriptorSet;
+        uiWrite.dstBinding = 0;
+        uiWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        uiWrite.descriptorCount = 1;
+        uiWrite.pImageInfo = &uiDescriptor;
+        vkUpdateDescriptorSets(gpu.device, 1, &uiWrite, 0, nullptr);
     }
 
     if (ctx.hdrEnabled && static_cast<AntiAliasingMode>(ctx.antiAliasing) == AntiAliasingMode::TAA) {
@@ -355,6 +599,42 @@ void QualityTargets::destroyTargets(VkDevice device, VkDescriptorPool tonemapPoo
         if (hdrMemory != VK_NULL_HANDLE) {
             vkFreeMemory(device, hdrMemory, nullptr);
         }
+        const auto destroyBlurTarget = [device](BlurTarget& target) {
+            if (target.framebuffer != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device, target.framebuffer, nullptr);
+            }
+            if (target.depthView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, target.depthView, nullptr);
+            }
+            if (target.depthImage != VK_NULL_HANDLE) {
+                vkDestroyImage(device, target.depthImage, nullptr);
+            }
+            if (target.depthMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, target.depthMemory, nullptr);
+            }
+            if (target.view != VK_NULL_HANDLE) {
+                vkDestroyImageView(device, target.view, nullptr);
+            }
+            if (target.image != VK_NULL_HANDLE) {
+                vkDestroyImage(device, target.image, nullptr);
+            }
+            if (target.memory != VK_NULL_HANDLE) {
+                vkFreeMemory(device, target.memory, nullptr);
+            }
+            target = BlurTarget{};
+        };
+        destroyBlurTarget(blurA);
+        destroyBlurTarget(blurB);
+        if (uiAppendFramebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device, uiAppendFramebuffer, nullptr);
+        }
+        if (uiAppendRenderPass != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device, uiAppendRenderPass, nullptr);
+        }
+        destroyBlurTarget(uiTarget);
+        if (blurSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, blurSampler, nullptr);
+        }
         if (reflectFramebuffer != VK_NULL_HANDLE) {
             vkDestroyFramebuffer(device, reflectFramebuffer, nullptr);
         }
@@ -383,6 +663,17 @@ void QualityTargets::destroyTargets(VkDevice device, VkDescriptorPool tonemapPoo
         if (reflectSampler != VK_NULL_HANDLE) {
             vkDestroySampler(device, reflectSampler, nullptr);
         }
+#if defined(APORIA_EXPERIMENTAL)
+        if (tonemapVolumetricBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, tonemapVolumetricBuffer, nullptr);
+        }
+        if (tonemapVolumetricMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, tonemapVolumetricMemory, nullptr);
+        }
+        if (tonemapDepthSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, tonemapDepthSampler, nullptr);
+        }
+#endif
         scene.releaseResources(device);
         if (tonemapPool != VK_NULL_HANDLE) {
             // Pool is owned by initialize/destroy; rebuild only reclaims
@@ -413,6 +704,39 @@ void QualityTargets::destroyTargets(VkDevice device, VkDescriptorPool tonemapPoo
     reflectSampler = VK_NULL_HANDLE;
     reflectRenderPass = VK_NULL_HANDLE;
     tonemapDescriptorSet = VK_NULL_HANDLE;
+    blurA = BlurTarget{};
+    blurB = BlurTarget{};
+    blurSampler = VK_NULL_HANDLE;
+    blurASet = VK_NULL_HANDLE;
+    blurBSet = VK_NULL_HANDLE;
+    blurWidth = 0;
+    blurHeight = 0;
+    uiTarget = BlurTarget{};
+    uiTargetSet = VK_NULL_HANDLE;
+    uiAppendRenderPass = VK_NULL_HANDLE;
+    uiAppendFramebuffer = VK_NULL_HANDLE;
+
+#if defined(APORIA_EXPERIMENTAL)
+    tonemapDepthSampler = VK_NULL_HANDLE;
+    tonemapVolumetricBuffer = VK_NULL_HANDLE;
+    tonemapVolumetricMemory = VK_NULL_HANDLE;
+#endif
 }
+
+#if defined(APORIA_EXPERIMENTAL)
+bool QualityTargets::writeTonemapVolumetric(const VolumetricUniforms& uniforms) noexcept {
+    if (tonemapVolumetricMemory == VK_NULL_HANDLE || gpu.device == VK_NULL_HANDLE) {
+        return false;
+    }
+    void* mapped = nullptr;
+    if (vkMapMemory(gpu.device, tonemapVolumetricMemory, 0, sizeof(VolumetricUniforms), 0, &mapped) != VK_SUCCESS ||
+        mapped == nullptr) {
+        return false;
+    }
+    std::memcpy(mapped, &uniforms, sizeof(uniforms));
+    vkUnmapMemory(gpu.device, tonemapVolumetricMemory);
+    return true;
+}
+#endif
 
 } // namespace Aporia::graphics_internal

@@ -1,5 +1,6 @@
 #include "MemoryManager.hpp"
 
+#include <cstdio>
 #include <cstring>
 
 namespace Aporia::graphics_internal {
@@ -30,8 +31,10 @@ bool MemoryManager::uploadBuffer(
         VkDeviceMemory& memory) noexcept {
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
+    
     if (size == 0 || data == nullptr || context.device == VK_NULL_HANDLE ||
         context.commandBuffer == VK_NULL_HANDLE) {
+        
         return false;
     }
 
@@ -106,15 +109,19 @@ bool MemoryManager::uploadBuffer(
         return false;
     }
 
-    if (vkQueueWaitIdle(context.queue) != VK_SUCCESS ||
-        vkResetCommandBuffer(context.commandBuffer, 0) != VK_SUCCESS) {
+    const VkResult waitIdleResult = vkQueueWaitIdle(context.queue);
+    const VkResult resetResult = waitIdleResult == VK_SUCCESS ? vkResetCommandBuffer(context.commandBuffer, 0) : waitIdleResult;
+    if (waitIdleResult != VK_SUCCESS || resetResult != VK_SUCCESS) {
+        
         destroyStaging();
         return false;
     }
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(context.commandBuffer, &beginInfo) != VK_SUCCESS) {
+    const VkResult beginResult = vkBeginCommandBuffer(context.commandBuffer, &beginInfo);
+    if (beginResult != VK_SUCCESS) {
+        
         destroyStaging();
         return false;
     }
@@ -139,6 +146,7 @@ bool MemoryManager::uploadBuffer(
                          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1, &uploadBarrier, 0, nullptr);
 
     if (vkEndCommandBuffer(context.commandBuffer) != VK_SUCCESS) {
+        
         destroyStaging();
         return false;
     }
@@ -149,6 +157,7 @@ bool MemoryManager::uploadBuffer(
     submitInfo.pCommandBuffers = &context.commandBuffer;
     const VkResult submitResult = vkQueueSubmit(context.queue, 1, &submitInfo, VK_NULL_HANDLE);
     const VkResult waitResult = submitResult == VK_SUCCESS ? vkQueueWaitIdle(context.queue) : submitResult;
+    
     destroyStaging();
     return submitResult == VK_SUCCESS && waitResult == VK_SUCCESS;
 }

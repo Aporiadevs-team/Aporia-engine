@@ -60,6 +60,7 @@ bool headlessSkyCheck() {
     cfg.headlessWidth = 256;
     cfg.headlessHeight = 256;
     cfg.quality = Aporia::GraphicsQuality::High;
+    cfg.sky = true;
     if (!graphics.initialize({}, cfg)) {
         std::cerr << "headless init failed: " << graphics.lastError() << '\n';
         return false;
@@ -150,6 +151,7 @@ int main(int argc, char** argv) {
     config.headless = false;
     config.quality = Aporia::GraphicsQuality::High;
     config.enableValidation = false;
+    config.sky = true;
     config.sunDirection[0] = 0.3f;
     config.sunDirection[1] = -0.5f;
     config.sunDirection[2] = 0.8f;

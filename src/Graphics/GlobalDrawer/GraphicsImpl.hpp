@@ -23,6 +23,7 @@
 #include "Device/Threading/JobSystem.hpp"
 #include "Graphics/GlobalDrawer/Text/FontStore.hpp"
 #include "Graphics/GlobalDrawer/Hdr/HdrRenderer.hpp"
+#include "Graphics/GlobalDrawer/Layers/UiLayerStack.hpp"
 #include "Graphics/GlobalDrawer/Materials/MaterialStore.hpp"
 #include "Graphics/GlobalDrawer/Meshes/MeshRenderer.hpp"
 #include "Graphics/GlobalDrawer/Meshes/MeshStore.hpp"
@@ -32,6 +33,7 @@
 #include "Graphics/GlobalDrawer/Sky/SkyRenderer.hpp"
 #include "Graphics/GlobalDrawer/Support/Support.hpp"
 #include "Graphics/GlobalDrawer/Text/TextRenderer.hpp"
+#include "Graphics/GlobalDrawer/Volumetric/VolumetricRenderer.hpp"
 #include "Graphics/TextureManager/TextureStore.hpp"
 #include "Graphics/TextureManager/TextureManager.hpp"
 
@@ -101,7 +103,8 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     static constexpr std::uint32_t kSecondaryUiText = 3;
     static constexpr std::uint32_t kSecondaryTonemap = 4;
     static constexpr std::uint32_t kSecondarySky = 5;
-    static constexpr std::uint32_t kSecondaryCount = 6;
+    static constexpr std::uint32_t kSecondaryPresent = 6;
+    static constexpr std::uint32_t kSecondaryCount = 7;
     VkCommandPool secondaryPools[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
     VkCommandBuffer secondaryBuffers[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
     VkImage colorImage = VK_NULL_HANDLE;
@@ -145,6 +148,11 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
 #if defined(APORIA_EXPERIMENTAL)
     // EXPERIMENTAL per-item multi-layer materials (set = 1).
     graphics_internal::MaterialStore materialStore;
+    // EXPERIMENTAL froxel volumetric fog producer (inject compute pass).
+    graphics_internal::VolumetricRenderer volumetric;
+    // EXPERIMENTAL 2D layer compositor: buckets the UI draw list into ordered
+    // layers so rects/text interleave without the renderers knowing about layers.
+    graphics_internal::UiLayerStack layerStack;
     // EXPERIMENTAL worker pool used by the frame recorder.
     std::unique_ptr<graphics_internal::JobSystem> jobs;
     // EXPERIMENTAL per-slot command pool + buffer for the shadow pass, recorded
@@ -303,7 +311,25 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     bool createSwapchainResources();
     bool recreateSwapchain() noexcept;
     void renderShadowMap(VkCommandBuffer buffer, const float sunMatrix[16]);
-    void renderUiText(VkCommandBuffer buffer, std::uint32_t width, std::uint32_t height);
+    // Renders the text runs of `ui` (a plain UiDrawList; the caller passes a
+    // layer bucket, so this pass never sees a UiLayer).
+    void renderUiText(VkCommandBuffer buffer, std::uint32_t width, std::uint32_t height, const Aporia::UiDrawList& ui);
+
+#if defined(APORIA_EXPERIMENTAL)
+    // Layered text: lay out every run in layer order into one glyph batch, upload
+    // it once, then draw each layer's contiguous range separately so interlacing
+    // with rects does not clobber the shared uniform buffer.
+    void prepareUiText(std::uint32_t width, std::uint32_t height, const Aporia::UiDrawList& ui);
+    void drawUiTextLayer(VkCommandBuffer buffer, Aporia::UiLayer layer);
+
+    struct UiTextRange {
+        std::uint32_t first = 0;
+        std::uint32_t count = 0;
+    };
+    UiTextRange uiTextRanges[Aporia::kUiLayerCount]{};
+    float cachedUiOutlineWidth = 0.0f;
+    graphics_internal::TextColor cachedUiOutlineColor{};
+#endif
     void renderTonemap(VkCommandBuffer cmd, VkFramebuffer target, std::uint32_t width, std::uint32_t height);
     bool renderFrameCommands(VkFramebuffer targetFramebuffer, std::uint32_t width, std::uint32_t height) noexcept;
     void destroy() noexcept;

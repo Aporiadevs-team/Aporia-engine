@@ -98,11 +98,20 @@ bool Graphics::Impl::rebuildQualityTargets() {
     context.tonemapDescriptorPool = pipelines.tonemapDescriptorPool;
     context.tonemapVertexShader = pipelines.tonemapVertexShader;
     context.taaFragmentShader = pipelines.taaFragmentShader;
+#if defined(APORIA_EXPERIMENTAL)
+    context.froxelView = volumetric.view();
+    context.froxelSampler = volumetric.sampler();
+#endif
     std::string error;
     if (!QualityTargets::rebuild(context, error)) {
         setError(error);
         return false;
     }
+#if defined(APORIA_EXPERIMENTAL)
+    // Volumetric::rebuild above recreated the shadow map, so re-point the inject
+    // pass at the new depth view before the next dispatch.
+    volumetric.bindShadow(shadow.view, shadow.sampler);
+#endif
     return true;
 }
 

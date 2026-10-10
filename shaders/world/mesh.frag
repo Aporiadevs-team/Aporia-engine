@@ -209,5 +209,7 @@ void main() {
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - fragWorldPosition);
     lit = planarReflection(lit, normal, viewDirection);
 
+    // Aerial in-scattering is handled by the froxel volumetric pass now; keep the
+    // surface lighting itself un-hazed so the world does not wash out with range.
     outColor = vec4(lit, fragColor.a * texAlpha); // linear HDR; tonemap pass converts to display
 }

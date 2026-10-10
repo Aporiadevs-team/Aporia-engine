@@ -65,14 +65,29 @@ void main() {
     float burn = band * sky.twilight.a;
     color = mix(color, sky.twilight.rgb * 1.15, clamp(burn, 0.0, 0.85));
 
-    // Compact twilight glow around the sun so the disk sinks rather than floats.
-    float sunProx = pow(max(cosAngle, 0.0), 6.0);
-    color = mix(color, sky.twilight.rgb, clamp(sky.twilight.a * sunProx * 0.7, 0.0, 0.8));
+    // Twilight glow hugging the sun (kept tight so it does not flood the sky).
+    float sunProx = pow(max(cosAngle, 0.0), 22.0);
+    color = mix(color, sky.twilight.rgb, clamp(sky.twilight.a * sunProx * 0.5, 0.0, 0.6));
 
-    // Sun disk + tight glow.
-    float disk = smoothstep(0.9990, 0.9997, cosAngle);
-    float glow = pow(max(cosAngle, 0.0), 400.0) * 0.5 + pow(max(cosAngle, 0.0), 32.0) * 0.10;
+    // Sun disk + a tight glow (no wide halo).
+    float disk = smoothstep(0.9995, 0.9998, cosAngle);
+    float glow = pow(max(cosAngle, 0.0), 400.0) * 0.5 + pow(max(cosAngle, 0.0), 96.0) * 0.06;
     color += sky.sunColor.rgb * (disk + glow) * sky.sunDirection.w * sky.skyParams.z;
+
+    // Sun corona: a bright core, a soft glare halo and four thin rays (a lens
+    // star), like the reference's lamp coronas. Offset in camera right/up space.
+    {
+        const float lx = dot(worldDir, sky.cameraRight.xyz);
+        const float ly = dot(worldDir, sky.cameraUp.xyz);
+        const float sx = dot(sunDir, sky.cameraRight.xyz);
+        const float sy = dot(sunDir, sky.cameraUp.xyz);
+        const float r = length(vec2(lx - sx, ly - sy));
+        // Round glow only -- no cross/star on the sun. The beams that reach the
+        // camera come from the screen-space god rays in the tonemap pass.
+        const float core = exp(-r * r / 0.00035) * 1.6 + exp(-r * 10.0) * 0.12;
+        const vec3 coronaColor = mix(sky.sunColor.rgb, vec3(1.0, 0.9, 0.7), 0.5);
+        color += coronaColor * core * sky.sunDirection.w;
+    }
 
     // Night: moon opposite the sun, plus faint stars.
     vec3 moonDir = normalize(-sunDir);
