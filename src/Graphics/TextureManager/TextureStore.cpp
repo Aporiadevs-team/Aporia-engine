@@ -288,6 +288,9 @@ void TextureStore::destroy(TextureHandle handle, SceneBindings& scene, std::stri
         error = "Texture handle is invalid";
         return;
     }
+    // Destroy requires that no in-flight GPU command references the texture.
+    // vkDeviceWaitIdle is necessary here — we have no access to the per-frame
+    // fence from TextureStore, and destroying a live resource would be UB.
     if (device_.device == VK_NULL_HANDLE || vkDeviceWaitIdle(device_.device) != VK_SUCCESS) {
         error = "vkDeviceWaitIdle(texture destroy) failed";
         return;

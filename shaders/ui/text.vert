@@ -2,14 +2,18 @@
 
 // Uniform-driven text quads: no vertex buffer, each glyph is 6 vertices
 // generated from gl_VertexIndex. FontData layout must match
-// Aporia::graphics_internal::FontData in TextRenderer.hpp.
+// Aporia::graphics_internal::TextRenderer.
+//
+// Layout: 4 vec4 header (64 B) + per-glyph data stored as 4 consecutive vec4s
+// (64 B per glyph).  MaxGlyphs = 2048 ⇒ 2048 × 64 = 131 072 B after header,
+// total = 131 136 B.  chars[] must hold 2048 × 4 = 8192 entries.
 
 layout(set = 0, binding = 0) uniform FontData {
     vec4 screenData;    // xy = screen size, z = guiScale, w = outlineWidth
     vec4 outlineColor;  // rgba
     vec4 atlasData;     // xy = atlas size, z = distanceRange, w = fontSize
     ivec4 charCount;    // x = number of glyphs in batch
-    vec4 chars[2048];    // 4 vec4 per glyph: posSize, uvCoords, color, rotationData
+    vec4 chars[8192];    // 4 vec4 per glyph × 2048 max glyphs = 8192
 } font;
 
 layout(location = 0) out vec2 texCoord;

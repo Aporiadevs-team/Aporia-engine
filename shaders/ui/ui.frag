@@ -3,6 +3,8 @@
 // UI pass: SDF rounded rectangles with an optional in-rect blur. It shares the
 // tonemap descriptor set (binding 0 = HDR scene) and blends over the already
 // tonemapped frame with straight alpha, so no framebuffer fetch is needed.
+// NOTE: No ACES tonemapping here — the scene is already tonemapped in the
+// tonemap pass. Applying acesFilm() a second time would crush highlights.
 layout(set = 0, binding = 0) uniform sampler2D hdrTexture;
 
 layout(push_constant) uniform UiPush {
@@ -16,18 +18,15 @@ layout(push_constant) uniform UiPush {
 layout(location = 0) in vec2 fragUv;
 layout(location = 0) out vec4 outColor;
 
-vec3 acesFilm(vec3 x) {
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
-
+// displaySample is kept only for the blur path which composites a display-space
+// blur over the linear HDR scene before the tonemap pass runs again.  The blur
+// path (ui.blur.x > 0.5) reads hdrTexture in linear space and mixes it with
+// the solid color; for that path we do need a single display conversion so the
+// blurred result doesn't look washed out.
 vec3 displaySample(vec2 uv) {
-    vec3 mapped = acesFilm(texture(hdrTexture, clamp(uv, 0.0, 1.0)).rgb * 1.1);
-    return pow(mapped, vec3(1.0 / 2.2));
+    vec3 linear = texture(hdrTexture, clamp(uv, 0.0, 1.0)).rgb * 1.1;
+    vec3 mapped = pow(linear, vec3(1.0 / 2.2));
+    return mapped;
 }
 
 void main() {

@@ -43,6 +43,7 @@
 #include <vulkan/vulkan.h>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -160,7 +161,10 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     // synchronization rule (one pool, one recording thread) intact.
     VkCommandPool shadowCommandPools[graphics_internal::Device::MaxFramesInFlight] = {};
     VkCommandBuffer shadowCommandBuffers[graphics_internal::Device::MaxFramesInFlight] = {};
-    bool shadowRecordedThisFrame = false;
+    // Atomic flag: set to true by the worker thread AFTER shadow map recording
+    // completes. The main thread reads this atomically before dispatching the
+    // tonemap pass — prevents reading an empty shadow map on the first frame.
+    std::atomic<bool> shadowRecordedThisFrame{false};
     bool multithreadedRender = true;
 #endif
     std::uint32_t shadowMapSize = 0;

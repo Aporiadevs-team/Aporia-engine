@@ -84,12 +84,9 @@ bool TextureManager::uploadTexture(
     std::memcpy(mapped, pixels, dataSize);
     vkUnmapMemory(context.device, stagingMemory);
 
-    vkDeviceWaitIdle(context.device);
-    if (vkResetCommandBuffer(context.commandBuffer, 0) != VK_SUCCESS) {
-        destroyStaging();
-        return false;
-    }
-
+    // Async upload: no vkDeviceWaitIdle / vkQueueWaitIdle — the caller may
+    // still be recording commands for other frames, so a full device wait would
+    // serialize the entire pipeline. Instead we use a fence for per-upload sync.
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -151,10 +148,29 @@ bool TextureManager::uploadTexture(
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &context.commandBuffer;
-    const VkResult submitResult = vkQueueSubmit(context.queue, 1, &submitInfo, VK_NULL_HANDLE);
-    const VkResult waitResult = submitResult == VK_SUCCESS ? vkQueueWaitIdle(context.queue) : submitResult;
+
+    // Use a fence for per-upload sync instead of vkQueueWaitIdle — avoids
+    // blocking the entire GPU pipeline when other frames are still in-flight.
+    VkFence uploadFence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    const VkResult fenceResult = vkCreateFence(
+        context.device,
+        &fenceInfo,
+        nullptr, &uploadFence);
+    const VkResult submitResult = fenceResult == VK_SUCCESS
+        ? vkQueueSubmit(context.queue, 1, &submitInfo, uploadFence)
+        : vkQueueSubmit(context.queue, 1, &submitInfo, VK_NULL_HANDLE);
+
+    if (fenceResult == VK_SUCCESS) {
+        vkWaitForFences(context.device, 1, &uploadFence, VK_TRUE,
+                        std::numeric_limits<uint64_t>::max());
+        vkDestroyFence(context.device, uploadFence, nullptr);
+    } else if (submitResult == VK_SUCCESS) {
+        vkQueueWaitIdle(context.queue);
+    }
     destroyStaging();
-    return submitResult == VK_SUCCESS && waitResult == VK_SUCCESS;
+    return submitResult == VK_SUCCESS;
 }
 
 bool TextureManager::createResource(

@@ -115,9 +115,9 @@ std::optional<Contact> boxBox(const Body& first, const Body& second) noexcept {
     const std::array<Vec3, 3> firstAxes = boxAxes(first);
     const std::array<Vec3, 3> secondAxes = boxAxes(second);
     const Vec3 centerSeparation = second.settings.position - first.settings.position;
-    const Vec3 contactPoint = (first.settings.position + second.settings.position) * 0.5;
     std::optional<Contact> bestContact;
     double smallestOverlap = std::numeric_limits<double>::infinity();
+    Vec3 bestContactPoint{};  // will be set when best axis is found
 
     const auto testAxis = [&](const Vec3& candidate) noexcept {
         const double lengthSquared = candidate.lengthSquared();
@@ -135,7 +135,20 @@ std::optional<Contact> boxBox(const Body& first, const Body& second) noexcept {
 
         const double sign = projectedDistance >= 0.0 ? 1.0 : -1.0;
         smallestOverlap = overlap;
-        bestContact = Contact{axis * sign, contactPoint, overlap};
+        // Contact point: the deepest corner of the incident body projected
+        // along the contact normal.  The incident body is the one whose face
+        // is parallel to the reference face (i.e. the body whose axis aligns
+        // with the MTD axis).
+        const Body* incident = projectedDistance >= 0.0 ? &first : &second;
+        const Bounds b = localBounds(*incident);
+        // Pick the corner furthest along (or against) the normal.
+        const Vec3 localCorner{
+            sign * b.minimum.x > 0.0 ? b.minimum.x : b.maximum.x,
+            sign * b.minimum.y > 0.0 ? b.minimum.y : b.maximum.y,
+            sign * b.minimum.z > 0.0 ? b.minimum.z : b.maximum.z,
+        };
+        bestContactPoint = localToWorld(*incident, localCorner);
+        bestContact = Contact{axis * sign, bestContactPoint, overlap};
     };
 
     for (const Vec3& axis : firstAxes) {

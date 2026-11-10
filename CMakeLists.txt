@@ -61,7 +61,9 @@ endif()
 
 if(APORIA_ENABLE_GRAPHICS)
     include(Shaders)  # Vulkan + SPIR-V compile, AporiaVulkanShaders target
-    target_include_directories(AporiaEngine SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
+    # Vulkan include dirs come automatically via Vulkan::Vulkan target link
+    # (see line 76 below). Do NOT add a separate target_include_directories
+    # for ${Vulkan_INCLUDE_DIRS} — it is undefined and causes build failures.
     target_compile_definitions(AporiaEngine PUBLIC APORIA_ENGINE_HAS_GRAPHICS)
     target_compile_definitions(AporiaEngine PRIVATE
         "APORIA_VULKAN_SHADER_DIR=\"${APORIA_VULKAN_SHADER_DIR}\"")

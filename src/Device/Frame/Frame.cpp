@@ -116,7 +116,7 @@ bool Graphics::renderHeadlessFrame() noexcept {
     VkCommandBuffer frameBuffers[2]{};
     std::uint32_t frameBufferCount = 0;
 #if defined(APORIA_EXPERIMENTAL)
-    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffers[frameSlot] != VK_NULL_HANDLE) {
+    if (impl_->shadowRecordedThisFrame.load(std::memory_order_acquire) && impl_->shadowCommandBuffers[frameSlot] != VK_NULL_HANDLE) {
         frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffers[frameSlot];
     }
 #endif
@@ -236,7 +236,7 @@ bool Graphics::renderNativeFrame() noexcept {
     VkCommandBuffer frameBuffers[2]{};
     std::uint32_t frameBufferCount = 0;
 #if defined(APORIA_EXPERIMENTAL)
-    if (impl_->shadowRecordedThisFrame && impl_->shadowCommandBuffers[frameSlot] != VK_NULL_HANDLE) {
+    if (impl_->shadowRecordedThisFrame.load(std::memory_order_acquire) && impl_->shadowCommandBuffers[frameSlot] != VK_NULL_HANDLE) {
         frameBuffers[frameBufferCount++] = impl_->shadowCommandBuffers[frameSlot];
     }
 #endif
@@ -410,7 +410,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
 
     const bool recordShadow = shadowsEnabled && pipelines.shadowPipeline != VK_NULL_HANDLE && !pendingItems.empty();
 #if defined(APORIA_EXPERIMENTAL)
-    shadowRecordedThisFrame = false;
+    shadowRecordedThisFrame.store(false, std::memory_order_release);
     VkCommandBuffer shadowCmd = shadowCommandBuffers[slotIndex];
     if (recordShadow && multithreadedRender && jobs && shadowCmd != VK_NULL_HANDLE) {
         float shadowSunMatrix[16];
@@ -423,11 +423,12 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             if (vkBeginCommandBuffer(shadowCmd, &info) == VK_SUCCESS) {
                 renderShadowMap(shadowCmd, shadowSunMatrix);
                 vkEndCommandBuffer(shadowCmd);
-            } else {
-                shadowRecordedThisFrame = false;
+                // Signal main thread: shadow recording completed successfully.
+                shadowRecordedThisFrame.store(true, std::memory_order_release);
             }
+            // On failure the flag stays false (main thread re-sets it to false
+            // each frame so a stale true is never possible).
         });
-        shadowRecordedThisFrame = true;
     } else if (recordShadow) {
         renderShadowMap(cmd, sunMatrix);
     }
@@ -438,7 +439,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
 #endif
 
 #if defined(APORIA_EXPERIMENTAL)
-    if (shadowRecordedThisFrame) {
+    if (shadowRecordedThisFrame.load(std::memory_order_acquire)) {
         VkImageMemoryBarrier shadowBarrier{};
         shadowBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         shadowBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
