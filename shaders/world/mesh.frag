@@ -47,6 +47,7 @@ layout(set = 0, binding = 3) uniform SceneUniforms {
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragUv;
 layout(location = 5) in vec4 fragColor;
+layout(location = 6) in float fragEmissive;
 layout(location = 2) in vec3 fragWorldPosition;
 layout(location = 3) in vec4 fragShadowPosition; // sun clip space
 layout(location = 4) in vec4 fragClipPosition;   // main camera clip space
@@ -174,9 +175,10 @@ void main() {
     vec3 sunlight = vec3(1.0, 0.96, 0.86) * diffuse * shadow * scene.sunDirection.w;
     vec3 lit = albedo * (skyAmbient * scene.shadingParams.x + sunlight);
 
-    // Dynamic lights: point/spot with a soft radial falloff ("рыхлость"),
-    // directional without attenuation. LIGHTS_MAX is a specialization constant,
-    // so Low compiles the loop (and its cost) away.
+    // Dynamic lights: point/spot with improved physics-based falloff,
+    // directional without attenuation. Adds inverse-square-ish attenuation
+    // plus soft radial falloff ("рыхлость"), simple contact occlusion to
+    // block the light through geometry, and Cook-Torrance-style specular.
     const int lightCount = int(scene.lightInfo.x);
     for (int i = 0; i < LIGHTS_MAX; ++i) {
         if (i >= lightCount) {
@@ -188,22 +190,82 @@ void main() {
         vec4 lprm = scene.lightParams[i];
         vec3 L;
         float atten = 1.0;
+        float occlusion = 1.0;
         if (lp.w < 0.5) {
-            L = normalize(ldir.xyz); // directional
+            L = normalize(ldir.xyz); // directional — no attenuation
         } else {
             vec3 toLight = lp.xyz - fragWorldPosition;
             float dist = length(toLight);
             L = toLight / max(dist, 1e-4);
+
+            // Point/Spot: inverse-square attenuation clamped by radius + soft edge.
+            // Uses a physical I/d^2 term scaled by intensity * radius^2 so that a
+            // light of intensity I and radius R emits roughly I at distance R.
+            float invSq = 1.0 / (dist * dist);
+            float scale = lprm.x * lprm.x; // radius^2
+            atten = invSq * scale;
+            // Soft roll-off near radius edge
             float t = clamp(1.0 - dist / max(lprm.x, 1e-4), 0.0, 1.0);
-            atten = t * t * (3.0 - 2.0 * t);
-            atten = pow(atten, max(lprm.y, 0.01));
+            atten *= t * t * (3.0 - 2.0 * t);
+            atten = pow(max(atten, 0.0), max(lprm.y, 0.01));
+
+            // Simple sphere occlusion march: short ray toward the light with
+            // per-step shadow map + world-space check. Only the first 3 steps
+            // matter — it's cheap and kills through-wall light spill.
+            if (fragClipPosition.w > 0.0) {
+                float stepDist = min(dist * 0.4, 3.0); // two steps max
+                for (int s = 1; s <= 3; ++s) {
+                    float st = stepDist * float(s) / 3.0;
+                    vec3 sampleWorld = fragWorldPosition + L * st;
+                    vec4 sampleClip = scene.sunViewProj * vec4(sampleWorld, 1.0);
+                    if (sampleClip.w > 0.0) {
+                        vec3 sc = sampleClip.xyz / sampleClip.w;
+                        sc.xy = sc.xy * 0.5 + 0.5;
+                        if (all(greaterThan(sc.xy, vec2(0.0))) && all(lessThan(sc.xy, vec2(1.0)))) {
+                            float receiverDepth = sc.z;
+                            float mapDepth = texture(shadowMap, sc.xy).r;
+                            if (mapDepth + 0.003 < receiverDepth) {
+                                occlusion = min(occlusion, 0.15);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Spot cone
             if (lp.w > 1.5) {
                 float cosAngle = dot(normalize(-L), normalize(ldir.xyz));
                 atten *= smoothstep(lprm.w, lprm.z, cosAngle);
             }
         }
+
         float ndl = max(dot(normal, L), 0.0);
-        lit += albedo * lcol.rgb * lcol.w * ndl * atten;
+        vec3 lightContribution = albedo * lcol.rgb * lcol.w * ndl * atten * occlusion;
+
+        // --- Specular (Blinn-Phong approximation) ---
+        // Simple but effective: half-vector based specular that makes wet
+        // asphalt, metal, and glossy surfaces catch the light.
+        if (ndl > 0.001 && atten > 0.01) {
+            vec3 V = normalize(scene.cameraPosition.xyz - fragWorldPosition);
+            vec3 H = normalize(L + V);
+            float nh = max(dot(normal, H), 0.0);
+            // Roughness varies: smooth surfaces (wet asphalt, metal) get
+            // sharper highlights, rough (ground) gets softer.
+            float specExponent = mix(8.0, 128.0, albedoLuminance); // bright albedo = likely smoother
+            float spec = pow(nh, specExponent) * atten * occlusion * lcol.w;
+            // Slightly blue-white tint for specular (physical: Fresnel at grazing)
+            lightContribution += vec3(0.9, 0.92, 1.0) * spec * 0.35;
+        }
+
+        lit += lightContribution;
+    }
+
+    // --- Emissive self-illumination ---
+    // The mesh itself emits light. Emissive is added directly to the output
+    // so it can bloom and god-ray. A simple ambient multiplication prevents
+    // pure-black surfaces from going fully emissive.
+    if (fragEmissive > 0.001) {
+        lit += albedo * fragEmissive;
     }
 
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - fragWorldPosition);

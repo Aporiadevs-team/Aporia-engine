@@ -59,6 +59,7 @@ void MeshRenderer::renderMeshes(
 #endif
         std::memcpy(push.model, item.modelMatrix, sizeof(push.model));
         std::memcpy(push.color, item.color, sizeof(push.color));
+        push.emissive = item.emissive;
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                            0, sizeof(push), &push);
         VkDeviceSize offset = 0;

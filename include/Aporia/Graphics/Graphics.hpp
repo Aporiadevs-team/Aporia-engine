@@ -189,6 +189,12 @@ struct RenderItem {
     std::uint64_t meshId = 0;
     float modelMatrix[16] = {};
     float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Emissive self-illumination (0 = no glow, >0 = bright self-luminous).
+    // Multiplied by color to allow warm white, neon blue, etc. The value is
+    // a linear multiplier: 1.0 means "emit full color brightness", 0.5 is
+    // half-brightness, 3.0 is overdriven (useful for bloom highlights).
+    // Emissive pixels pass through the bloom bright-pass in tonemap.frag.
+    float emissive = 0.0f;
 #if defined(APORIA_EXPERIMENTAL)
     MaterialHandle material{}; // multi-layer material (see createMaterial)
 #endif

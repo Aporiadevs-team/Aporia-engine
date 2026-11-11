@@ -36,6 +36,10 @@ struct PhysicsWorld::Impl {
     std::vector<std::uint32_t> pairStamp;
     std::uint32_t pairStampCounter = 0;
 
+    // Sleeping parameters.
+    double sleepThreshold = 0.03; // m/s linear velocity
+    double sleepCounterLimit = 6; // frames below threshold before sleep
+
     static std::uint64_t packCell(std::int32_t x, std::int32_t y, std::int32_t z) noexcept {
         const std::uint64_t bx = static_cast<std::uint32_t>(x) & 0x1FFFFFu;
         const std::uint64_t by = static_cast<std::uint32_t>(y) & 0x1FFFFFu;
@@ -200,6 +204,16 @@ struct PhysicsWorld::Impl {
                 continue;
             }
 
+            // Skip sleeping bodies — they are stable and don't need solving.
+            if (body.sleepCounter > 0) {
+                // Wake up if forces were applied.
+                if (body.force.lengthSquared() > 1.0e-6 || body.torque.lengthSquared() > 1.0e-6) {
+                    body.sleepCounter = 0;
+                } else {
+                    continue;
+                }
+            }
+
             body.velocity += (gravity + body.force * bodyInverseMass) * deltaSeconds;
             body.settings.position += body.velocity * deltaSeconds;
 
@@ -221,6 +235,23 @@ struct PhysicsWorld::Impl {
 
         for (apr::Body& body : bodies) {
             applySteering(body, deltaSeconds);
+        }
+
+        // Sleep check: bodies with velocity below threshold increment their
+        // counter; once it exceeds the limit they stop participating in the
+        // solver until woken by an external force or collision.
+        for (apr::Body& body : bodies) {
+            if (body.settings.isStatic || body.settings.mass <= 0.0) {
+                continue;
+            }
+            const double speed = body.velocity.length();
+            if (speed > sleepThreshold) {
+                body.sleepCounter = 0; // wake
+            } else if (body.force.lengthSquared() > 1.0e-6 || body.torque.lengthSquared() > 1.0e-6) {
+                body.sleepCounter = 0; // wake on force
+            } else {
+                ++body.sleepCounter;
+            }
         }
 
         resolveCollisions();
@@ -515,6 +546,9 @@ struct PhysicsWorld::Impl {
             if (inverseMass(first) <= 0.0 && inverseMass(second) <= 0.0) {
                 return;
             }
+            // Wake both bodies on contact — at least one is moving.
+            if (first.sleepCounter > 0) first.sleepCounter = 0;
+            if (second.sleepCounter > 0) second.sleepCounter = 0;
             const Vec3 delta = second.settings.position - first.settings.position;
             const double reach = first.boundingRadius + second.boundingRadius;
             const bool hasHeightfield = first.colliderType == apr::ColliderType::Heightfield ||
@@ -542,6 +576,10 @@ struct PhysicsWorld::Impl {
             if (body.colliderType == apr::ColliderType::Heightfield) {
                 continue;
             }
+            // Skip sleeping bodies — they won't collide with anything active.
+            if (body.sleepCounter > static_cast<int>(sleepCounterLimit)) {
+                continue;
+            }
             std::int32_t x0, y0, z0, x1, y1, z1;
             gridRange(body, cellSize, x0, y0, z0, x1, y1, z1);
             for (std::int32_t x = x0; x <= x1; ++x) {
@@ -557,6 +595,10 @@ struct PhysicsWorld::Impl {
         for (std::size_t firstIndex = 0; firstIndex < bodies.size(); ++firstIndex) {
             const apr::Body& first = bodies[firstIndex];
             if (first.colliderType == apr::ColliderType::Heightfield) {
+                continue;
+            }
+            // Skip sleeping bodies — they won't be moved by active bodies.
+            if (first.sleepCounter > static_cast<int>(sleepCounterLimit)) {
                 continue;
             }
             ++pairStampCounter;
@@ -879,6 +921,56 @@ void PhysicsWorld::setTimestepHz(double hz) noexcept {
 
 double PhysicsWorld::timestepHz() const noexcept {
     return impl_->timestepHz;
+}
+
+void PhysicsWorld::destroyBody(BodyHandle body) noexcept {
+    if (!body.valid()) {
+        return;
+    }
+
+    const auto it = impl_->indexById.find(body.value);
+    if (it == impl_->indexById.end()) {
+        return;
+    }
+
+    const std::size_t index = it->second;
+    if (index >= impl_->bodies.size()) {
+        impl_->indexById.erase(it);
+        return;
+    }
+
+    // Heightfield bodies cannot be destroyed.
+    if (impl_->bodies[index].colliderType == apr::ColliderType::Heightfield) {
+        return;
+    }
+
+    impl_->indexById.erase(it);
+    impl_->bodies.erase(impl_->bodies.begin() + static_cast<std::ptrdiff_t>(index));
+
+    // Rebuild indexById — destroyBody is rare so rebuilding is fine.
+    impl_->indexById.clear();
+    for (std::size_t i = 0; i < impl_->bodies.size(); ++i) {
+        impl_->indexById.insert_or_assign(impl_->bodies[i].id, i);
+    }
+}
+
+void PhysicsWorld::setSleepThreshold(double velocityMps) noexcept {
+    impl_->sleepThreshold = std::max(velocityMps, 0.0);
+}
+
+double PhysicsWorld::sleepThreshold() const noexcept {
+    return impl_->sleepThreshold;
+}
+
+void PhysicsWorld::wakeBody(BodyHandle body) noexcept {
+    if (!body.valid()) {
+        return;
+    }
+    const auto it = impl_->indexById.find(body.value);
+    if (it == impl_->indexById.end()) {
+        return;
+    }
+    impl_->bodies[it->second].sleepCounter = 0;
 }
 
 void PhysicsWorld::setSolverIterations(std::uint32_t iterations) noexcept {

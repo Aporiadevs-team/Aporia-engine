@@ -17,6 +17,11 @@ layout(set = 0, binding = 2) uniform InjectParams {
     vec4 sunColor;       // rgb sunlight colour
     vec4 fogParams;      // x near, y far, z density, w height falloff (1/m)
     vec4 gridParams;     // x phaseG, y noiseScale, z groundZ, w time (seconds)
+    // Up to 4 point lights that scatter light through fog (cone/god-ray effect).
+    // Each: position.xyz + type (1.0 = point).
+    vec4 lightPosition[4];
+    vec4 lightColor[4];  // rgb + intensity
+    vec4 lightParams[4]; // x radius, y softness
 } p;
 
 const float PI = 3.14159265;
@@ -100,6 +105,28 @@ void main() {
     const float phase = henyeyGreenstein(dot(rayDir, sunDir), clamp(p.gridParams.x, -0.9, 0.9));
     // Scattering coefficient * incident radiance (per unit length): the density
     // must be folded in here, otherwise every froxel scatters like opaque air.
-    const vec3 scatter = p.sunColor.rgb * (p.sunDirection.w * phase * visibility) * density;
+    vec3 scatter = p.sunColor.rgb * (p.sunDirection.w * phase * visibility) * density;
+
+    // Point light volumetric scattering: each lamp creates a cone/god-ray effect
+    // through fog. Uses distance attenuation + phase function for the light.
+    const int pointLightCount = 4;
+    for (int li = 0; li < pointLightCount; ++li) {
+        vec4 lpos = p.lightPosition[li];
+        if (lpos.w < 0.5) continue; // not a point light
+        vec3 toLight = lpos.xyz - worldPos;
+        float d = length(toLight);
+        if (d > p.lightParams[li].x * 2.0) continue; // outside useful range
+        vec3 ldir = toLight / max(d, 1e-4);
+        // Inverse-square-ish attenuation
+        float atten = p.lightParams[li].x * p.lightParams[li].x / (d * d + 0.1);
+        atten *= max(1.0 - d / (p.lightParams[li].x * 1.5), 0.0);
+        atten = pow(atten, max(p.lightParams[li].y, 0.01));
+        float intensity = max(p.lightColor[li].w, 0.01);
+        vec3 lcol = p.lightColor[li].rgb;
+        // Simple isotropic scatter (no directionality for point lights in fog).
+        // Adds visible light shafts where fog is dense.
+        scatter += lcol * atten * intensity * density * 0.12;
+    }
+
     imageStore(froxelImage, cell, vec4(scatter, density));
 }

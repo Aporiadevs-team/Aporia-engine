@@ -33,6 +33,9 @@ class APORIA_API Scene {
 public:
     ObjectHandle createObject(std::string name = {});
 
+    // Destroy a scene object and remove all its components.
+    bool removeObject(ObjectHandle handle) noexcept;
+
     [[nodiscard]] bool contains(ObjectHandle handle) const noexcept;
     [[nodiscard]] std::size_t objectCount() const noexcept;
 
@@ -106,6 +109,9 @@ private:
 
     Component* findStoredComponent(ObjectHandle object, ComponentTypeId type) noexcept;
     const Component* findStoredComponent(ObjectHandle object, ComponentTypeId type) const noexcept;
+
+    // O(1) id → vector index map, rebuilt whenever objects are removed.
+    std::unordered_map<std::uint64_t, std::size_t> objectIdToIndex_;
 
     std::vector<Object> objects_;
     std::vector<Component> components_;

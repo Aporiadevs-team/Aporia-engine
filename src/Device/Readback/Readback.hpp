@@ -19,6 +19,7 @@ struct ReadbackContext {
     VkImage colorImage = VK_NULL_HANDLE;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    bool isHdrFormat = false;  // true = R16G16B16A16_SFLOAT, false = RGBA8
 };
 
 // Copies the color image into host memory as tightly-packed RGBA8. The source

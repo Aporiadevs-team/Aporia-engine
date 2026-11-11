@@ -50,6 +50,9 @@ struct Body {
     // Heightfield payload (valid when colliderType == Heightfield).
     TerrainDesc terrainDescription;
     TerrainHeightfield terrainField;
+    // Sleeping support: counts frames below the velocity threshold; non-zero
+    // means the body is settling toward sleep state.
+    int sleepCounter = 0;
 };
 
 struct Contact {

@@ -7,6 +7,35 @@
 
 namespace Aporia::graphics_internal {
 
+// Converts R16G16B16A16_SFLOAT (HDR) to RGBA8 (LDR) with ACES tonemap + sRGB gamma.
+static std::uint8_t toSrgb(float v) noexcept {
+    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    return static_cast<std::uint8_t>(std::round(v * 255.0f));
+}
+
+static bool convertHdrToLdr(const std::uint8_t* src, std::uint8_t* dst, std::size_t width, std::size_t height) {
+    const float* pixels = reinterpret_cast<const float*>(src);
+    for (std::size_t y = 0; y < height; ++y) {
+        for (std::size_t x = 0; x < width; ++x) {
+            const std::size_t idx = y * width + x;
+            const float r = pixels[idx * 4 + 0];
+            const float g = pixels[idx * 4 + 1];
+            const float b = pixels[idx * 4 + 2];
+            // ACES filmic tone mapping
+            const float a = 2.51f, b_val = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+            const float rt = (r * (a * r + b_val)) / (r * (c * r + d) + e);
+            const float gt = (g * (a * g + b_val)) / (g * (c * g + d) + e);
+            const float bt = (b * (a * b + b_val)) / (b * (c * b + d) + e);
+            // sRGB gamma
+            dst[idx * 4 + 0] = toSrgb(static_cast<float>(std::pow(rt, 1.0 / 2.2)));
+            dst[idx * 4 + 1] = toSrgb(static_cast<float>(std::pow(gt, 1.0 / 2.2)));
+            dst[idx * 4 + 2] = toSrgb(static_cast<float>(std::pow(bt, 1.0 / 2.2)));
+            dst[idx * 4 + 3] = 255;
+        }
+    }
+    return true;
+}
+
 bool readbackColorImage(const ReadbackContext& context, std::vector<std::uint8_t>& pixels) {
     if (context.device == VK_NULL_HANDLE || context.commandBuffer == VK_NULL_HANDLE ||
         context.queue == VK_NULL_HANDLE || context.colorImage == VK_NULL_HANDLE ||
@@ -160,7 +189,18 @@ bool readbackColorImage(const ReadbackContext& context, std::vector<std::uint8_t
         destroyReadback();
         return false;
     }
-    std::memcpy(pixels.data(), mapped, static_cast<std::size_t>(byteCount));
+    // If the source is HDR (R16G16B16A16_SFLOAT) convert to LDR (RGBA8) so
+    // the caller gets display-space pixels that can be compared.
+    if (context.isHdrFormat) {
+        std::vector<std::uint8_t> hdrPixels(static_cast<std::size_t>(byteCount));
+        std::memcpy(hdrPixels.data(), mapped, static_cast<std::size_t>(byteCount));
+        const VkDeviceSize dstByteCount = static_cast<VkDeviceSize>(context.width) *
+            static_cast<VkDeviceSize>(context.height) * 4;
+        pixels.assign(static_cast<std::size_t>(dstByteCount), 0);
+        convertHdrToLdr(hdrPixels.data(), pixels.data(), context.width, context.height);
+    } else {
+        std::memcpy(pixels.data(), mapped, static_cast<std::size_t>(byteCount));
+    }
     vkUnmapMemory(context.device, dstMemory);
     destroyReadback();
     return true;
@@ -182,9 +222,16 @@ bool Graphics::readbackPixels(std::vector<std::uint8_t>& pixels) const {
     context.memoryProperties = impl_->memoryProperties;
     context.commandBuffer = impl_->commandBuffer;
     context.queue = impl_->queue;
-    context.colorImage = impl_->colorImage;
-    context.width = impl_->renderWidth;
-    context.height = impl_->renderHeight;
+    // In HDR mode the tonemap pass (which includes SMAA/TAA) writes into
+    // hdrImage (R16G16B16A16_SFLOAT). Only fall back to colorImage when HDR is
+    // disabled. Mark HDR format so readback can convert to LDR.
+    context.colorImage = impl_->hdrImage != VK_NULL_HANDLE && impl_->hdrEnabled ?
+                         impl_->hdrImage : impl_->colorImage;
+    context.width = impl_->hdrEnabled && impl_->hdrWidth > 0 ?
+                    impl_->hdrWidth : impl_->renderWidth;
+    context.height = impl_->hdrEnabled && impl_->hdrHeight > 0 ?
+                     impl_->hdrHeight : impl_->renderHeight;
+    context.isHdrFormat = impl_->hdrEnabled && impl_->hdrImage != VK_NULL_HANDLE;
     return graphics_internal::readbackColorImage(context, pixels);
 }
 

@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake *)",
+      "Bash(select-object *)",
+      "Bash(.\\bin\\release\\aporiacli.exe)",
+      "Bash(.\\bin\\release\\aporiagraphicscli.exe)",
+      "Bash(.\\bin\\release\\aporiagraphicsstress.exe)",
+      "Bash(ctest *)",
+      "Bash(.\\bin\\release\\aporiatexttest.exe)",
+      "Bash(select-string *)",
+      "Bash(findstr *)",
+      "Bash(.\\bin\\release\\aporiatexttest.exe *)",
+      "Bash(.\\bin\\release\\aporiatextrepro.exe)",
+      "Bash(.\\bin\\release\\aporiatextrepro2.exe)",
+      "Bash(chcp *)",
+      "Bash(mkdir *)",
+      "Bash(dir *)",
+      "Bash(del *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(type *)",
+      "Bash(fc *)",
+      "Bash(where *)",
+      "Bash(rmdir *)",
+      "Bash(tee *)",
+      "Bash(cmd *)",
+      "Bash(move *)",
+      "Bash(powershell *)",
+      "Bash(c:\\aporia-engine-experement\\build-test-12\\bin\\release\\aporiarendertest12.exe *)",
+      "Bash(msbuild *)"
+    ]
+  },
+  "$version": 3
+}

@@ -78,6 +78,26 @@ if(APORIA_ENABLE_GRAPHICS)
 endif()
 
 # ---------------------------------------------------------------------------
+# Install rules for downstream projects (find_package(AporiaEngine))
+# ---------------------------------------------------------------------------
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(TARGETS AporiaEngine
+    EXPORT AporiaEngineTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+install(DIRECTORY include/Aporia
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.hpp")
+
+install(EXPORT AporiaEngineTargets
+    NAMESPACE Aporia::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/AporiaEngine)
+
+# ---------------------------------------------------------------------------
 # Tests, render tests and host samples
 # ---------------------------------------------------------------------------
 include(Tests)
