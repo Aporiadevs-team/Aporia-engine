@@ -209,6 +209,7 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
         float viewProj[16];
         float model[16];
         float color[4];
+        float emissive;
     };
 
     static constexpr std::uint32_t kMaxLights = graphics_internal::LightStore::kMaxLights;

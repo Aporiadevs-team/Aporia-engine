@@ -1,13 +1,53 @@
 #include "Aporia/Scene/Scene.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace Aporia {
 
 ObjectHandle Scene::createObject(std::string name) {
     const ObjectHandle handle{nextId_++};
+    const std::size_t index = objects_.size();
     objects_.push_back(Object{handle.value, std::move(name)});
+    objectIdToIndex_.insert_or_assign(handle.value, index);
     return handle;
+}
+
+bool Scene::removeObject(ObjectHandle handle) noexcept {
+    if (!handle.valid()) {
+        return false;
+    }
+
+    const auto mapIt = objectIdToIndex_.find(handle.value);
+    if (mapIt == objectIdToIndex_.end()) {
+        return false;
+    }
+
+    // Remove all components belonging to this object.
+    for (auto it = components_.begin(); it != components_.end(); ) {
+        if (it->objectId == handle.value) {
+            it = components_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Swap the object at the target index with the last object and update its
+    // index map entry.  This keeps the vector contiguous without reallocating.
+    const std::size_t targetIndex = mapIt->second;
+    objectIdToIndex_.erase(mapIt);
+
+    if (targetIndex == objects_.size() - 1) {
+        // The removed object is already the last one — nothing to swap.
+        objects_.pop_back();
+    } else {
+        const std::size_t lastIndex = objects_.size() - 1;
+        std::swap(objects_[targetIndex], objects_[lastIndex]);
+        objectIdToIndex_.at(objects_[targetIndex].id) = targetIndex;
+        objects_.pop_back();
+    }
+
+    return true;
 }
 
 Scene::Object* Scene::findObject(ObjectHandle handle) noexcept {
@@ -15,13 +55,11 @@ Scene::Object* Scene::findObject(ObjectHandle handle) noexcept {
         return nullptr;
     }
 
-    for (Object& object : objects_) {
-        if (object.id == handle.value) {
-            return &object;
-        }
+    const auto it = objectIdToIndex_.find(handle.value);
+    if (it == objectIdToIndex_.end() || it->second >= objects_.size()) {
+        return nullptr;
     }
-
-    return nullptr;
+    return &objects_[it->second];
 }
 
 const Scene::Object* Scene::findObject(ObjectHandle handle) const noexcept {
@@ -29,13 +67,11 @@ const Scene::Object* Scene::findObject(ObjectHandle handle) const noexcept {
         return nullptr;
     }
 
-    for (const Object& object : objects_) {
-        if (object.id == handle.value) {
-            return &object;
-        }
+    const auto it = objectIdToIndex_.find(handle.value);
+    if (it == objectIdToIndex_.end() || it->second >= objects_.size()) {
+        return nullptr;
     }
-
-    return nullptr;
+    return &objects_[it->second];
 }
 
 bool Scene::contains(ObjectHandle handle) const noexcept {

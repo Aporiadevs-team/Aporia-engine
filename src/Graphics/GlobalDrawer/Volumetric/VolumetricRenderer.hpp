@@ -44,6 +44,11 @@ public:
         float sunColor[4];     // rgb
         float fogParams[4];    // x near, y far, z density, w height falloff
         float gridParams[4];   // x phaseG, y noiseScale, z groundZ, w time
+        // Up to 4 point lights contribute volumetric scattering (cone/god-ray
+        // effect through fog). Each: position.xyz + type(1=point).
+        float lightPosition[4][4];
+        float lightColor[4][4]; // rgb + intensity
+        float lightParams[4][4]; // x radius, y softness
     };
 
     // Creates the froxel grid, sampler and compute pipeline. `shadowView` /

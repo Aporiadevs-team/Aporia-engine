@@ -49,6 +49,11 @@ public:
     // if graphics is not initialized or mesh creation failed.
     Body createBody(const BodyDesc& description);
 
+    // Destroy a body created via createBody(). Removes the physics body (when
+    // physics is enabled), the scene object and all its components (Transform,
+    // MeshRef, PhysicsRef). Invalidates the returned Body handle.
+    void destroyBody(BodyHandle handle) noexcept;
+
 #if defined(APORIA_ENGINE_HAS_PHYSICS)
     // Stage B terrain: generates the heightfield, creates the render mesh and
     // the static heightfield collider, returns them as a Body. The mesh is

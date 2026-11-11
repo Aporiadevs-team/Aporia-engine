@@ -529,6 +529,24 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             inject.gridParams[1] = 0.06f; // noise scale
             inject.gridParams[2] = 0.0f;  // ground z
             inject.gridParams[3] = static_cast<float>(frameCount) * 0.05f; // time
+            // Pass up to 4 point lights into the volumetric pass so lamps
+            // create visible volumetric cones in fog.
+            {
+                std::uint32_t lc = lightStore.count();
+                std::uint32_t count = lc < 4 ? lc : 4;
+                for (std::uint32_t li = 0; li < count; ++li) {
+                    inject.lightPosition[li][0] = lightStore.position[li][0];
+                    inject.lightPosition[li][1] = lightStore.position[li][1];
+                    inject.lightPosition[li][2] = lightStore.position[li][2];
+                    inject.lightPosition[li][3] = 1.0f; // mark as point light
+                    inject.lightColor[li][0] = lightStore.color[li][0];
+                    inject.lightColor[li][1] = lightStore.color[li][1];
+                    inject.lightColor[li][2] = lightStore.color[li][2];
+                    inject.lightColor[li][3] = lightStore.color[li][3]; // intensity
+                    inject.lightParams[li][0] = lightStore.params[li][0]; // radius
+                    inject.lightParams[li][1] = lightStore.params[li][1]; // softness
+                }
+            }
             volumetric.writeParams(uniformSlot, inject);
             volumetric.record(cmd, uniformSlot);
         }
@@ -963,6 +981,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     };
 
+#if defined(APORIA_EXPERIMENTAL)
     if (backdrop) {
         graphics_internal::HdrRenderer::TonemapContext targetContext;
         targetContext.commandBuffer = cmd;
@@ -1034,7 +1053,8 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             graphics_internal::HdrRenderer::renderTonemap(targetContext, targetFramebuffer, width, height,
                                                           &presentCb, 1);
         }
-    } else {
+    }
+#else
         if (uiBlurActive) {
             imageBarrier(hdrImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
@@ -1044,8 +1064,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         if (useHdr && haveTonemap) {
             renderTonemap(cmd, targetFramebuffer, width, height);
         }
-    }
-    
+#endif
 
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         setError("vkEndCommandBuffer failed");

@@ -4,6 +4,7 @@ layout(push_constant) uniform PushConstants {
     mat4 viewProj;
     mat4 model;
     vec4 color;
+    float emissive;
 } pc;
 
 layout(location = 0) in vec3 inPosition;
@@ -13,6 +14,7 @@ layout(location = 2) in vec2 inUv;
 layout(location = 0) out vec3 fragNormal;
 layout(location = 1) out vec2 fragUv;
 layout(location = 5) out vec4 fragColor;
+layout(location = 6) out float fragEmissive;
 layout(location = 2) out vec3 fragWorldPosition;
 layout(location = 3) out vec4 fragShadowPosition;
 layout(location = 4) out vec4 fragClipPosition;
@@ -32,6 +34,7 @@ void main() {
     fragNormal = normalize(mat3(pc.model) * inNormal);
     fragUv = inUv;
     fragColor = pc.color;
+    fragEmissive = pc.emissive;
     fragWorldPosition = worldPosition.xyz;
     fragShadowPosition = scene.sunViewProj * worldPosition;
     fragClipPosition = gl_Position;

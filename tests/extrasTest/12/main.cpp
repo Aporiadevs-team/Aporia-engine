@@ -1,4 +1,4 @@
-﻿// Aporia render test 12 — night alley lighting lab (SDL3 window).
+﻿﻿﻿﻿// Aporia render test 12 — night alley lighting lab (SDL3 window).
 //
 // A dim night alley: a ground strip, two walls and a row of lamp posts. Every
 // lamp carries a warm point light plus an emissive head, so the fixtures glow
@@ -233,26 +233,31 @@ int main(int argc, char** argv) {
     const Aporia::MeshHandle boxMesh = game.graphics().createMesh(Aporia::apr::makeBoxMesh(0.5f, 0.5f, 0.5f));
     const Aporia::FontHandle font = game.graphics().createFontFromTtf(firstExistingFont(), 44.0f);
 
-    // Night environment: keep the sun almost off, let the lamps do the work.
+    // Night environment: dim sun + soft ambient so lamps can be measured against
+    // a visible baseline.  geometry is dim but not black; lamps provide the warm
+    // pools that make the difference between “dark” and “lit”.
     Aporia::EnvironmentState environment;
     environment.sunDirection[0] = 0.2f;
     environment.sunDirection[1] = -0.3f;
     environment.sunDirection[2] = 0.93f;
-    environment.sunIntensity = 0.0f;
-    environment.ambient = 0.02f; // night: geometry is dark, lamps carry the scene
+    environment.sunIntensity = 0.15f;          // dim blue-grey fill from the sky
+    environment.ambient = 0.12f;               // enough to see albedo without lamps
 
     // Alley: ground + two long walls.
     struct Block {
         Aporia::Mat4 model;
         float color[3];
+        float emissive = 0.0f;
     };
     std::vector<Block> blocks;
-    const auto addBlock = [&](const Aporia::Vec3& position, const Aporia::Vec3& scale, float r, float g, float b) {
+    const auto addBlock = [&](const Aporia::Vec3& position, const Aporia::Vec3& scale,
+                              float r, float g, float b, float emiss = 0.0f) {
         Block block;
         block.model = makeModel(position, scale);
         block.color[0] = r;
         block.color[1] = g;
         block.color[2] = b;
+        block.emissive = emiss;
         blocks.push_back(block);
     };
     addBlock({0.0, 0.0, -0.1}, {5.0, 26.0, 0.2}, 0.05f, 0.05f, 0.06f);    // ground
@@ -268,10 +273,11 @@ int main(int argc, char** argv) {
     std::vector<Lamp> lamps;
     for (int index = 0; index < 5; ++index) {
         const double y = -12.0 + static_cast<double>(index) * 6.0;
-        addBlock({0.0, y, 0.25}, {0.5, 0.5, 0.5}, 0.12f, 0.12f, 0.13f);   // base
-        addBlock({0.0, y, 2.1}, {0.22, 0.22, 2.1}, 0.09f, 0.09f, 0.10f);  // post
-        addBlock({0.0, y, 4.35}, {0.85, 0.85, 0.12}, 0.06f, 0.06f, 0.07f); // cap
-        addBlock({0.0, y, 3.85}, {0.75, 0.75, 0.62}, 1.0f, 0.9f, 0.62f);  // glowing lantern
+        addBlock({0.0, y, 0.25}, {0.5, 0.5, 0.5}, 0.12f, 0.12f, 0.13f);     // base
+        addBlock({0.0, y, 2.1}, {0.22, 0.22, 2.1}, 0.09f, 0.09f, 0.10f);    // post
+        addBlock({0.0, y, 4.35}, {0.85, 0.85, 0.12}, 0.06f, 0.06f, 0.07f);  // cap
+        addBlock({0.0, y, 3.85}, {0.75, 0.75, 0.62}, 1.0f, 0.9f, 0.62f,
+                 2.5f);                                                     // glowing lantern
         lamps.push_back({Aporia::Vec3{0.0, y, 3.8}});
     }
     int litLamps = static_cast<int>(lamps.size());
@@ -351,6 +357,7 @@ int main(int argc, char** argv) {
             item.color[0] = block.color[0];
             item.color[1] = block.color[1];
             item.color[2] = block.color[2];
+            item.emissive = block.emissive;
             items.push_back(item);
         }
 

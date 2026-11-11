@@ -23,6 +23,7 @@ public:
         float viewProj[16];
         float model[16];
         float color[4];
+        float emissive;
     };
 
     static void renderMeshes(

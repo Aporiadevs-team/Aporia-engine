@@ -128,11 +128,17 @@ Body Game::createBody(const BodyDesc& description) {
             sphere.angularVelocity = description.angularVelocity;
             result.body_ = physics_.createSphere(sphere);
         } else if (description.meshKind == MeshKind::Capsule) {
+            // Apply transform scale to the capsule physics dimensions.
+            const double scaledRadius = static_cast<double>(description.capsuleRadius) *
+                std::max(description.transform.scale.x, description.transform.scale.z);
+            const double scaledHalfHeight = static_cast<double>(description.capsuleHalfHeight) *
+                description.transform.scale.y;
+
             CapsuleBodyConfig capsule;
             capsule.position = description.transform.position;
             capsule.orientation = description.transform.orientation;
-            capsule.radius = description.capsuleRadius;
-            capsule.halfHeight = description.capsuleHalfHeight;
+            capsule.radius = scaledRadius;
+            capsule.halfHeight = scaledHalfHeight;
             capsule.mass = description.mass;
             capsule.restitution = description.restitution;
             capsule.friction = description.friction;
@@ -151,6 +157,55 @@ Body Game::createBody(const BodyDesc& description) {
 
     result.object_ = object;
     return result;
+}
+
+void Game::destroyBody(BodyHandle handle) noexcept {
+    if (!handle.valid()) {
+        return;
+    }
+
+    // Find the scene object that owns this physics body.
+    const ComponentTypeId physicsType = scene_.componentTypeId("PhysicsRef");
+    const ComponentTypeId meshType = scene_.componentTypeId("MeshRef");
+    if (physicsType == invalidComponentType) {
+        return;
+    }
+
+    ObjectHandle targetObject;
+    MeshHandle targetMesh;
+
+    for (const Scene::ComponentView& view : scene_.components()) {
+        const ObjectHandle obj{view.objectId};
+        const PhysicsRef* ref = scene_.findComponent<PhysicsRef>(obj, physicsType);
+        if (ref != nullptr && ref->body.value == handle.value) {
+            targetObject = obj;
+            const Transform* transform = scene_.findComponent<Transform>(obj, scene_.componentTypeId("Transform"));
+            if (transform == nullptr) {
+                return; // invalid state
+            }
+            // Find the mesh component on the same object.
+            const MeshRef* meshRef = scene_.findComponent<MeshRef>(obj, meshType);
+            if (meshRef != nullptr) {
+                targetMesh = meshRef->mesh;
+            }
+            break;
+        }
+    }
+
+    // 1. Destroy the mesh.
+    if (targetMesh.valid()) {
+        graphics_.destroyMesh(targetMesh);
+    }
+
+    // 2. Remove the scene object (which also removes all its components).
+    if (targetObject.valid()) {
+        scene_.removeObject(targetObject);
+    }
+
+    // 3. Remove the physics body (when physics is enabled).
+#if defined(APORIA_ENGINE_HAS_PHYSICS)
+    physics_.destroyBody(handle);
+#endif
 }
 
 #if defined(APORIA_ENGINE_HAS_GRAPHICS) && defined(APORIA_ENGINE_HAS_PHYSICS)
