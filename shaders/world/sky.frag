@@ -15,6 +15,9 @@ layout(set = 0, binding = 0) uniform SkyUniforms {
     vec4 skyParams;     // x horizon exponent, y haze, z glow, w tan(halfFovY)
     vec4 renderParams;  // x aspect
     vec4 twilight;      // rgb warm glow (dawn yellow / dusk pink), a intensity
+    vec4 seasonSky;     // rgb zenith tint, a tint strength (0 = default palette)
+    vec4 seasonHaze;    // rgb horizon tint
+    vec4 fog;           // rgb weather fog colour, a horizon fog blend (0 = off)
 } sky;
 
 layout(location = 0) in vec2 fragUv;
@@ -39,10 +42,18 @@ void main() {
     const float daylight = clamp(sky.sunDirection.w, 0.0, 1.0);
     const float night = 1.0 - daylight;
 
-    // Vertical three-zone gradient (day vs night blends by daylight).
+    // Vertical three-zone gradient (day vs night blends by daylight). Season
+    // tints scale the day palette; a zero strength leaves it untouched.
     vec3 zenithDay = vec3(0.030, 0.070, 0.180), zenithNight = vec3(0.006, 0.010, 0.025);
     vec3 midDay = vec3(0.220, 0.380, 0.620), midNight = vec3(0.010, 0.016, 0.040);
     vec3 horizonDay = vec3(0.620, 0.720, 0.900), horizonNight = vec3(0.020, 0.026, 0.048);
+    const float seasonStrength = clamp(sky.seasonSky.a, 0.0, 1.0);
+    const vec3 zenithTint = mix(vec3(1.0), sky.seasonSky.rgb, seasonStrength);
+    const vec3 horizonTint = mix(vec3(1.0), sky.seasonHaze.rgb, seasonStrength);
+    const vec3 midTint = mix(zenithTint, horizonTint, 0.5);
+    zenithDay *= zenithTint;
+    midDay *= midTint;
+    horizonDay *= horizonTint;
     vec3 zenith = mix(zenithNight, zenithDay, daylight);
     vec3 mid = mix(midNight, midDay, daylight);
     vec3 horizon = mix(horizonNight, horizonDay, daylight);
@@ -99,6 +110,13 @@ void main() {
         float stars = hash31(floor(worldDir * 320.0));
         stars = smoothstep(0.9975, 1.0, stars);
         color += vec3(stars) * night;
+    }
+
+    // Weather fog collects toward the horizon so the sky matches the fogged
+    // world without flattening the zenith.
+    if (sky.fog.a > 0.0) {
+        const float horizonWeight = 0.35 + 0.65 * (1.0 - clamp(elevationZ, 0.0, 1.0));
+        color = mix(color, sky.fog.rgb, clamp(sky.fog.a * horizonWeight, 0.0, 0.9));
     }
 
     outColor = vec4(color, 1.0); // linear HDR; the tonemap pass converts to display

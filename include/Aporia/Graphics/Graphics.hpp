@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Aporia/Core/Export.hpp"
+#include "Aporia/Graphics/Weather.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -195,6 +196,11 @@ struct RenderItem {
     // half-brightness, 3.0 is overdriven (useful for bloom highlights).
     // Emissive pixels pass through the bloom bright-pass in tonemap.frag.
     float emissive = 0.0f;
+    // Per-item albedo texture. Invalid = the frame-wide texture chosen by
+    // Graphics::setTexture2D (the historical behavior, e.g. a shared imagery
+    // atlas). A valid handle samples that texture for this item only, so a
+    // scene can mix an atlas with individually textured models in one pass.
+    TextureHandle texture{};
 #if defined(APORIA_EXPERIMENTAL)
     MaterialHandle material{}; // multi-layer material (see createMaterial)
 #endif
@@ -203,6 +209,12 @@ struct RenderItem {
     // alpha comes from the material's base layer, so it composites over the
     // already-drawn opaque geometry.
     bool transparent = false;
+    // World-space bounds for engine-side frustum culling, applied per item in
+    // the mesh, shadow and reflection passes (modelMatrix is taken into
+    // account). Default is an inverted box = unbounded: the item is always
+    // drawn, preserving pre-culling behavior.
+    float aabbMin[3] = {0.0f, 0.0f, 0.0f};
+    float aabbMax[3] = {-1.0f, -1.0f, -1.0f};
 };
 
 enum class ShadowFilter : std::uint8_t {
@@ -370,6 +382,10 @@ struct GraphicsConfig {
     float mirrorZ = 0.0f;                         // planar reflection plane height (m)
     ShadowConfig shadows{};
     bool playerUltraShadows = false;
+    // Planar reflection pass (a second full-scene draw into the mirror target).
+    // The world shader does not sample that target yet, so hosts can switch the
+    // extra pass off without any visual change while mirror materials are absent.
+    bool reflections = true;
     AntiAliasingMode antiAliasing = AntiAliasingMode::SMAA;
     float antiAliasingStrength = 0.75f; // 0 = off, 1 = full blend
     BlurConfig blur{};
@@ -468,6 +484,21 @@ public:
     void setLights(const std::vector<LightDesc>& lights);
     void clearLights() noexcept;
     [[nodiscard]] std::size_t lightCount() const noexcept;
+
+    // Weather for the next frames: precipitation, wind and fog. A
+    // default-constructed WeatherState is clear, so nothing changes until the
+    // host submits weather. Without APORIA_SEASONS the state is stored but not
+    // rendered.
+    void setWeather(const WeatherState& weather) noexcept;
+    [[nodiscard]] WeatherState weather() const noexcept;
+
+#if defined(APORIA_SEASONS)
+    // Applies the season's atmosphere preset (sky tint, sun/ambient scaling, fog
+    // and precipitation defaults). Call setWeather() afterwards to override the
+    // weather fields with live data.
+    void setSeason(Season season) noexcept;
+    [[nodiscard]] Season season() const noexcept;
+#endif
 
     // Time-of-day clock (0..24h). Drives sunsets once the sky consumes it.
     void setTimeOfDay(double hours) noexcept;

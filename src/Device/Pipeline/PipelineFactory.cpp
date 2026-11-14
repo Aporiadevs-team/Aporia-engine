@@ -158,13 +158,18 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
 
     VkPipelineLayoutCreateInfo meshLayoutInfo{};
     meshLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    // Set 0 is the scene. Per-item albedo textures live in set 1, unless the
+    // experimental multi-layer material already owns set 1 — then set 2.
+    const VkDescriptorSetLayout itemTextureLayout =
+        context.textureLayout != VK_NULL_HANDLE ? context.textureLayout : context.triangleLayout;
 #if defined(APORIA_EXPERIMENTAL)
-    VkDescriptorSetLayout meshSetLayouts[2] = {context.sceneLayout, context.materialLayout};
-    meshLayoutInfo.setLayoutCount = 2;
+    VkDescriptorSetLayout meshSetLayouts[3] = {context.sceneLayout, context.materialLayout, itemTextureLayout};
+    meshLayoutInfo.setLayoutCount = 3;
     meshLayoutInfo.pSetLayouts = meshSetLayouts;
 #else
-    meshLayoutInfo.setLayoutCount = 1;
-    meshLayoutInfo.pSetLayouts = &context.sceneLayout;
+    VkDescriptorSetLayout meshSetLayouts[2] = {context.sceneLayout, itemTextureLayout};
+    meshLayoutInfo.setLayoutCount = 2;
+    meshLayoutInfo.pSetLayouts = meshSetLayouts;
 #endif
     meshLayoutInfo.pushConstantRangeCount = 1;
     meshLayoutInfo.pPushConstantRanges = &pushRange;

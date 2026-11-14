@@ -31,6 +31,9 @@ option(APORIA_ENABLE_NETWORKING "Networking module" OFF)
 # path. Currently: multi-layer per-item materials, multithreaded frame
 # recording, UI layers, and froxel volumetric fog.
 option(APORIA_EXPERIMENTAL "Experimental features (unstable)" OFF)
+# Seasons, weather-driven sky, precipitation and analytic fog. OFF keeps the
+# weather API compiled but inert and the sky palette unchanged.
+option(APORIA_SEASONS "Seasons and weather-driven sky" OFF)
 
 if(APORIA_ENABLE_VULKAN AND NOT APORIA_ENABLE_GRAPHICS)
     message(FATAL_ERROR "APORIA_ENABLE_VULKAN requires APORIA_ENABLE_GRAPHICS")

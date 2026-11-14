@@ -151,6 +151,13 @@ RaycastInternalHit raycastHeightfield(const Ray& ray, const Body& field, double 
         return hit;
     }
 
+    // Transform the ray into the terrain's local space where height is always Z.
+    // sampleHeightfield already works in local space; raycast must match.
+    const Quat orientation = field.terrainDescription.orientation.normalized();
+    const Vec3 localOrigin = orientation.inverseRotate(ray.origin - field.terrainDescription.position);
+    const Vec3 localDir    = orientation.inverseRotate(ray.direction);
+    const Ray localRay{localOrigin, localDir};
+
     const double cell = static_cast<double>(field.terrainField.worldSize) /
                         static_cast<double>(field.terrainField.resolution - 1);
     const double stepSize = std::max(0.05, cell * 0.5);
@@ -160,8 +167,11 @@ RaycastInternalHit raycastHeightfield(const Ray& ray, const Body& field, double 
     bool hasPrev = false;
 
     while (currentDist <= maxDistance) {
-        const Vec3 currentPoint = ray.pointAt(currentDist);
-        const HeightSample sample = sampleHeightfield(field, currentPoint);
+        const Vec3 currentPoint = localRay.pointAt(currentDist);
+        // sampleHeightfield expects world-space input, but currentPoint is local.
+        // Convert to world for the call, then use local Z for the elevation test.
+        const Vec3 worldPoint = orientation.rotate(currentPoint) + field.terrainDescription.position;
+        const HeightSample sample = sampleHeightfield(field, worldPoint);
         const double diff = currentPoint.z - sample.elevation;
 
         if (hasPrev && ((prevDiff > 0.0 && diff <= 0.0) || (prevDiff < 0.0 && diff >= 0.0))) {
@@ -169,8 +179,9 @@ RaycastInternalHit raycastHeightfield(const Ray& ray, const Body& field, double 
             double t1 = currentDist;
             for (int iter = 0; iter < 16; ++iter) {
                 const double tmid = 0.5 * (t0 + t1);
-                const Vec3 pmid = ray.pointAt(tmid);
-                const HeightSample smid = sampleHeightfield(field, pmid);
+                const Vec3 pmid = localRay.pointAt(tmid);
+                const Vec3 pworld = orientation.rotate(pmid) + field.terrainDescription.position;
+                const HeightSample smid = sampleHeightfield(field, pworld);
                 if (pmid.z > smid.elevation) {
                     t0 = tmid;
                 } else {
@@ -179,7 +190,10 @@ RaycastInternalHit raycastHeightfield(const Ray& ray, const Body& field, double 
             }
             const double tHit = 0.5 * (t0 + t1);
             hit.distance = tHit;
-            hit.point = ray.pointAt(tHit);
+            // Transform local-space hit point back to world space.
+            hit.point = orientation.rotate(localRay.pointAt(tHit)) +
+                        field.terrainDescription.position;
+            // sampleHeightfield already returns the world-space normal.
             const HeightSample finalSample = sampleHeightfield(field, hit.point);
             hit.normal = finalSample.normal;
             hit.hasHit = true;

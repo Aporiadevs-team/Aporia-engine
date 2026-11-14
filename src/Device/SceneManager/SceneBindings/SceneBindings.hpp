@@ -39,11 +39,11 @@ public:
     [[nodiscard]] bool resourcesReady() const noexcept { return pool_ != VK_NULL_HANDLE; }
 
     bool writeUniforms(std::uint32_t slot, const void* data, std::size_t size) noexcept;
-    void bindAlbedo(VkImageView view, VkSampler sampler) noexcept;
-    void bindReflection(VkImageView view, VkSampler sampler) noexcept;
+    void bindAlbedo(std::uint32_t frameSlot, VkImageView view, VkSampler sampler) noexcept;
+    void bindReflection(std::uint32_t frameSlot, VkImageView view, VkSampler sampler) noexcept;
 
 private:
-    void writeImage(std::uint32_t binding, VkImageView view, VkSampler sampler, VkImageLayout layout) noexcept;
+    void writeImage(std::uint32_t frameSlot, std::uint32_t binding, VkImageView view, VkSampler sampler, VkImageLayout layout) noexcept;
 
     VkDevice device_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout layout_ = VK_NULL_HANDLE;

@@ -63,6 +63,7 @@ struct PipelineContext {
     VkDescriptorSetLayout triangleLayout = VK_NULL_HANDLE;  // set 0 for the debug triangle
     VkDescriptorSetLayout sceneLayout = VK_NULL_HANDLE;     // set 0 for mesh/shadow
     VkDescriptorSetLayout materialLayout = VK_NULL_HANDLE;  // set 1 for mesh (experimental, optional)
+    VkDescriptorSetLayout textureLayout = VK_NULL_HANDLE;   // per-item albedo: set 1, or set 2 with materials
     std::string shaderDirectory;
     bool reflectionsEnabled = false;
     std::int32_t shadowTaps = 9;

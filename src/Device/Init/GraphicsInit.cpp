@@ -45,6 +45,9 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     impl_->environment.mirrorZ = config.mirrorZ;
     impl_->shadowExtent = config.shadowExtent;
     impl_->applyQualityPreset(config.quality);
+    // The preset sets the per-tier default; the host may only turn the extra
+    // pass further off (mirror surfaces are not sampled by the world shader).
+    impl_->reflectionsEnabled = impl_->reflectionsEnabled && config.reflections;
     impl_->antiAliasing = static_cast<std::uint32_t>(config.antiAliasing);
     impl_->antiAliasingStrength = std::clamp(config.antiAliasingStrength, 0.0f, 1.0f);
     impl_->blurConfig = config.blur;
@@ -333,6 +336,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     pipelineContext.shadowRenderPass = impl_->shadow.renderPass;
     pipelineContext.triangleLayout = impl_->textureStore.descriptorSetLayout();
     pipelineContext.sceneLayout = sceneLayout;
+    pipelineContext.textureLayout = impl_->textureStore.descriptorSetLayout();
 #if defined(APORIA_EXPERIMENTAL)
     pipelineContext.materialLayout = impl_->materialStore.descriptorSetLayout();
 #endif
@@ -356,6 +360,18 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
             return false;
         }
     }
+
+#if defined(APORIA_SEASONS)
+    {
+        std::string precipitationError;
+        if (!impl_->precipitation.initialize(impl_->device, impl_->memoryProperties, impl_->renderPass,
+                                             impl_->hdrRenderPass, shaderDirectory, precipitationError)) {
+            impl_->setError(precipitationError);
+            shutdown();
+            return false;
+        }
+    }
+#endif
 
 #if defined(APORIA_EXPERIMENTAL)
     {
@@ -419,6 +435,9 @@ void Graphics::Impl::destroy() noexcept {
         destroySwapchainResources();
         graphics_internal::destroyPipelines(device, pipelines);
         sky.shutdown(device);
+#if defined(APORIA_SEASONS)
+        precipitation.shutdown(device);
+#endif
         taa.shutdown();
         scene.destroyLayout(device);
 #if defined(APORIA_EXPERIMENTAL)

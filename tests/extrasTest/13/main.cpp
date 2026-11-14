@@ -114,12 +114,20 @@ bool headlessSkyCheck() {
 
 int main(int argc, char** argv) {
     double durationSeconds = 0.0;
+    double startTimeHours = 7.0;
     bool headlessOnly = false;
     for (int index = 1; index < argc; ++index) {
         if (std::strcmp(argv[index], "--duration") == 0 && index + 1 < argc) {
             durationSeconds = std::atof(argv[++index]);
         } else if (std::strcmp(argv[index], "--headless") == 0) {
             headlessOnly = true;
+        } else if (std::strcmp(argv[index], "--time") == 0 && index + 1 < argc) {
+            const char* spec = argv[++index];
+            startTimeHours = std::atof(spec);
+            const char* colon = std::strchr(spec, ':');
+            if (colon != nullptr) {
+                startTimeHours += std::atof(colon + 1) / 60.0;
+            }
         }
     }
     if (headlessOnly) {
@@ -152,6 +160,7 @@ int main(int argc, char** argv) {
     config.quality = Aporia::GraphicsQuality::High;
     config.enableValidation = false;
     config.sky = true;
+    config.reflections = false;
     config.sunDirection[0] = 0.3f;
     config.sunDirection[1] = -0.5f;
     config.sunDirection[2] = 0.8f;
@@ -163,7 +172,7 @@ int main(int argc, char** argv) {
     }
     game.graphics().setVsync(false);
     // Sun follows the clock: start at morning, one day per two real minutes.
-    game.graphics().setTimeOfDay(7.0);
+    game.graphics().setTimeOfDay(startTimeHours);
     game.graphics().setGameClock(2.0f, 1.0f);
     game.graphics().setTimeDrivenSun(true);
     int demoMonth = 6;

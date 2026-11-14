@@ -124,14 +124,16 @@ bool ShadowRenderer::createTargets(
 
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    // Depth must be sampled point-wise: linear filtering interpolates between
+    // two surfaces at a silhouette and makes the shadow edge crawl and swim.
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.maxLod = 1.0f;
+    samplerInfo.maxLod = 0.0f;
     if (vkCreateSampler(device, &samplerInfo, nullptr, &resources.sampler) != VK_SUCCESS) {
         destroyTargets(device, resources);
         return false;
@@ -252,23 +254,31 @@ void ShadowRenderer::buildSunMatrix(
     const Aporia::Vec3 cameraPosition(cameraPositionIn[0], cameraPositionIn[1], cameraPositionIn[2]);
     Aporia::Vec3 center = cameraPosition;
     const Aporia::Vec3 up = std::abs(directionZ) < 0.9f ? Aporia::Vec3(0.0, 0.0, 1.0) : Aporia::Vec3(1.0, 0.0, 0.0);
-    const Aporia::Vec3 lightEye = center + sunDirection * 60.0;
+    const double extent = std::max(1.0, static_cast<double>(shadowExtent));
+    // The sun eye sits far enough that the whole ortho box (plus room for tall
+    // casters) fits between near and far, whatever extent the host picked.
+    const double eyeDistance = std::max(60.0, extent + 40.0);
+    const double farPlane = std::max(200.0, eyeDistance + extent + 80.0);
+    const Aporia::Vec3 lightEye = center + sunDirection * eyeDistance;
     const Aporia::Mat4 unsnappedView = Aporia::Mat4::lookAt(lightEye, center, up);
     const Aporia::Vec3 right{unsnappedView.m[0][0], unsnappedView.m[1][0], unsnappedView.m[2][0]};
     const Aporia::Vec3 correctedUp{unsnappedView.m[0][1], unsnappedView.m[1][1], unsnappedView.m[2][1]};
-    const Aporia::Vec3 offset = center - lightEye;
-    const double lightX = dot(right, offset);
-    const double lightY = dot(correctedUp, offset);
-    const double extent = std::max(1.0, static_cast<double>(shadowExtent));
+    // The light-space position of the camera centre. offset itself is parallel
+    // to the sun direction, so projecting IT onto right/up always gives zero --
+    // the snap has to work on the absolute light-space centre, otherwise the
+    // texel grid slides with the camera and every shadow edge swims.
+    const double lightX = dot(right, center);
+    const double lightY = dot(correctedUp, center);
     const double texelWorldSize = (extent * 2.0) / static_cast<double>(std::max(1u, mapSize));
     if (texelWorldSize > 0.0) {
         const double snappedX = std::round(lightX / texelWorldSize) * texelWorldSize;
         const double snappedY = std::round(lightY / texelWorldSize) * texelWorldSize;
         center += right * (snappedX - lightX) + correctedUp * (snappedY - lightY);
     }
-    const Aporia::Vec3 eye = center + sunDirection * 60.0;
+    const Aporia::Vec3 eye = center + sunDirection * eyeDistance;
     const Aporia::Mat4 view = Aporia::Mat4::lookAt(eye, center, up);
-    const Aporia::Mat4 projection = Aporia::Mat4::orthographicVulkan(extent * 2.0, extent * 2.0, 0.1, 200.0);
+    const Aporia::Mat4 projection =
+        Aporia::Mat4::orthographicVulkan(extent * 2.0, extent * 2.0, 0.1, farPlane);
     const Aporia::Mat4 sunViewProj = projection * view;
     std::memcpy(outMatrix, &sunViewProj, sizeof(sunViewProj));
 }

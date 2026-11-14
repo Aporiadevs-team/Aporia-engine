@@ -45,6 +45,7 @@ public:
     void record(
         VkCommandBuffer commandBuffer,
         VkImage depthImage,
+        std::uint32_t frameSlot,
         const float prevViewProj[16],
         const float invViewProj[16],
         float blend) noexcept;
@@ -52,7 +53,9 @@ public:
     void resetHistory() noexcept { historyValid_ = false; }
 
 private:
-    bool uploadUniforms(const float prevViewProj[16], const float invViewProj[16], float blend);
+    bool uploadUniforms(std::uint32_t frameSlot, const float prevViewProj[16], const float invViewProj[16], float blend);
+
+    static constexpr std::uint32_t kSlots = 2;
 
     VkDevice device_ = VK_NULL_HANDLE;
     VkPhysicalDeviceMemoryProperties memoryProperties_{};
@@ -71,9 +74,9 @@ private:
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet descriptorSet_ = VK_NULL_HANDLE;
-    VkBuffer uniformBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory uniformMemory_ = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorSets_[kSlots]{};
+    VkBuffer uniformBuffers_[kSlots]{};
+    VkDeviceMemory uniformMemories_[kSlots]{};
 
     VkImage resolveImage_ = VK_NULL_HANDLE;
     VkDeviceMemory resolveMemory_ = VK_NULL_HANDLE;

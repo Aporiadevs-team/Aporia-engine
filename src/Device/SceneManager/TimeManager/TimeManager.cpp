@@ -10,6 +10,7 @@
 
 #include "TimeManager.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -70,8 +71,9 @@ void TimeManager::update(double realDeltaSeconds) noexcept {
     if (realDeltaSeconds <= 0.0) {
         return;
     }
-    // Game minutes elapsed this frame = real seconds * (game minutes / real minute) / 60.
-    hours_ = wrapHours(hours_ + realDeltaSeconds * timeScale_ / 60.0);
+    // timeScale_ is game minutes per real minute: real seconds -> real minutes
+    // (/60), then game minutes -> hours (/60), so the divisor is 3600.
+    hours_ = wrapHours(hours_ + realDeltaSeconds * timeScale_ / 3600.0);
 }
 
 double TimeManager::totalHours() const noexcept {
@@ -140,12 +142,21 @@ double TimeManager::daylightLength() const noexcept {
 void TimeManager::sunDirection(float out[3], double azimuthOffsetRadians) const noexcept {
     const double sunrise = sunriseHour();
     const double sunset = sunsetHour();
+    // Peak solar altitude follows the day length: a short winter day keeps the
+    // noon sun low (long shadows, lit facades) instead of putting it at the
+    // zenith, a near-polar summer day lifts it high. Without a latitude input
+    // this is the only seasonal signal the clock has.
+    const double dayHours = std::max(1.0, sunset - sunrise);
+    const double peak = std::clamp(std::pow(dayHours / 24.0, 1.6), 0.12, 0.97);
     double elevation = 0.0;
     double horizontal = 1.0;
     if (hours_ >= sunrise && hours_ <= sunset) {
         const double u = (hours_ - sunrise) / (sunset - sunrise);
-        elevation = std::sin(kPi * u);   // 0 at the ends, +1 at solar noon
-        horizontal = std::cos(kPi * u);  // +1 east at sunrise, -1 west at sunset
+        const double sine = std::sin(kPi * u);   // 0 at the ends, +1 at solar noon
+        const double cosine = std::cos(kPi * u); // +1 east at sunrise, -1 west at sunset
+        elevation = peak * sine;
+        horizontal = std::sqrt(std::max(0.0, 1.0 - elevation * elevation)) *
+                     (cosine >= 0.0 ? 1.0 : -1.0);
     } else {
         // Night: from sunset round through midnight back to sunrise.
         const double nightLength = 24.0 - (sunset - sunrise);

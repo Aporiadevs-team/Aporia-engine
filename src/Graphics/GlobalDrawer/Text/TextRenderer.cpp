@@ -71,9 +71,9 @@ bool TextRenderer::initialize(const Context& context) noexcept {
 
     VkDescriptorSetLayoutBinding bindings[2]{};
     bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[1].descriptorCount = 1;
@@ -89,7 +89,7 @@ bool TextRenderer::initialize(const Context& context) noexcept {
     }
 
     VkDescriptorPoolSize poolSizes[2]{};
-    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[0].descriptorCount = SlotCount;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = SlotCount;
@@ -108,7 +108,7 @@ bool TextRenderer::initialize(const Context& context) noexcept {
         VkBufferCreateInfo bufferInfo{};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufferInfo.size = bufferSize;
-        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         if (vkCreateBuffer(device_, &bufferInfo, nullptr, &slot.buffer) != VK_SUCCESS) {
             destroy();
@@ -151,7 +151,7 @@ bool TextRenderer::initialize(const Context& context) noexcept {
         write.dstSet = slot.descriptorSet;
         write.dstBinding = 0;
         write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         write.pBufferInfo = &bufferDescriptor;
         vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
     }

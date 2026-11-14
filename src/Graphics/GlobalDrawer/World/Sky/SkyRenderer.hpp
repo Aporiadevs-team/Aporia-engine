@@ -29,6 +29,9 @@ public:
         float skyParams[4];    // x horizon exponent, y haze, z glow, w tan(halfFovY)
         float renderParams[4]; // x aspect
         float twilight[4];     // rgb warm glow (dawn yellow / dusk pink), a intensity
+        float seasonSky[4];    // rgb zenith tint, a tint strength (0 = palette default)
+        float seasonHaze[4];   // rgb horizon tint
+        float fog[4];          // rgb weather fog colour, a horizon fog blend (0 = off)
     };
 
     bool initialize(

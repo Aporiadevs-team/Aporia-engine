@@ -30,7 +30,10 @@
 #include "Graphics/GlobalDrawer/Rectangulars/RectRenderer.hpp"
 #include "Graphics/GlobalDrawer/Shadows/ShadowRenderer.hpp"
 #include "Graphics/GlobalDrawer/Light/LightStore.hpp"
-#include "Graphics/GlobalDrawer/Sky/SkyRenderer.hpp"
+#include "Graphics/GlobalDrawer/World/Sky/SkyRenderer.hpp"
+#if defined(APORIA_SEASONS)
+#include "Graphics/GlobalDrawer/World/Weather/PrecipitationRenderer.hpp"
+#endif
 #include "Graphics/GlobalDrawer/Support/Support.hpp"
 #include "Graphics/GlobalDrawer/Text/TextRenderer.hpp"
 #include "Graphics/GlobalDrawer/Volumetric/VolumetricRenderer.hpp"
@@ -105,7 +108,8 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     static constexpr std::uint32_t kSecondaryTonemap = 4;
     static constexpr std::uint32_t kSecondarySky = 5;
     static constexpr std::uint32_t kSecondaryPresent = 6;
-    static constexpr std::uint32_t kSecondaryCount = 7;
+    static constexpr std::uint32_t kSecondaryPrecipitation = 7;
+    static constexpr std::uint32_t kSecondaryCount = 8;
     VkCommandPool secondaryPools[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
     VkCommandBuffer secondaryBuffers[graphics_internal::Device::MaxFramesInFlight][kSecondaryCount] = {};
     VkImage colorImage = VK_NULL_HANDLE;
@@ -143,9 +147,22 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     std::uint32_t maxLights = 16;
     // Procedural infinite sky drawn as the scene background.
     graphics_internal::SkyRenderer sky;
+    // Weather submitted by the host. Inert (clear, zero fog) by default; the
+    // precipitation batch and the fog uniforms are compiled with APORIA_SEASONS.
+    Aporia::WeatherState weather{};
+    float frameDeltaSeconds = 1.0f / 60.0f;
+#if defined(APORIA_SEASONS)
+    graphics_internal::PrecipitationRenderer precipitation;
+    Aporia::Season season = Aporia::Season::Summer;
+    Aporia::SeasonPreset seasonAtmosphere{};
+    bool seasonActive = false;
+#endif
     // Time-of-day clock (drives sunsets in the sky once wired up).
     graphics_internal::TimeManager timeManager;
     bool timeDrivenSun = false;
+    // Sky-ambient multiplier for the current sun elevation (1 = day). Only the
+    // time-driven sun changes it; a host-driven sun keeps the full ambient.
+    float nightAmbientScale = 1.0f;
 #if defined(APORIA_EXPERIMENTAL)
     // EXPERIMENTAL per-item multi-layer materials (set = 1).
     graphics_internal::MaterialStore materialStore;
@@ -215,6 +232,7 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     static constexpr std::uint32_t kMaxLights = graphics_internal::LightStore::kMaxLights;
     struct SceneUniforms {
         float sunViewProj[16];
+        float viewProj[16];
         float sunDirection[4];
         float cameraPosition[4];
         float shadingParams[4];
@@ -225,9 +243,11 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
         float lightDirection[kMaxLights][4];
         float lightColor[kMaxLights][4];
         float lightParams[kMaxLights][4];
+        float fogColor[4];  // rgb fog colour, a density (1/m, 0 = off)
+        float fogParams[4]; // x height falloff (1/m), y fog base height
     };
-    static_assert(sizeof(SceneUniforms) == 144 + 16 + 4 * 16 * 16,
-                  "SceneUniforms layout must match shaders/mesh.frag");
+    static_assert(sizeof(SceneUniforms) == 144 + 64 + 16 + 32 + 4 * 16 * 16,
+                  "SceneUniforms layout must match shaders/world/mesh.frag");
 
     CameraState pendingCamera{};
     float pendingViewProj[16]{};
@@ -291,6 +311,27 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
             environment.sunDirection, pendingCamera.position, shadowExtent, shadowMapSize, outMatrix);
     }
 
+    // Season presets modulate the host environment instead of replacing it: the
+    // sun direction always comes from EnvironmentState, the preset only scales
+    // intensity and sets the ambient floor.
+    [[nodiscard]] float effectiveSunIntensity() const noexcept {
+#if defined(APORIA_SEASONS)
+        if (seasonActive) {
+            return environment.sunIntensity * seasonAtmosphere.sunIntensityScale;
+        }
+#endif
+        return environment.sunIntensity;
+    }
+
+    [[nodiscard]] float effectiveAmbient() const noexcept {
+#if defined(APORIA_SEASONS)
+        if (seasonActive) {
+            return seasonAtmosphere.ambient;
+        }
+#endif
+        return environment.ambient;
+    }
+
     // Camera mirrored across z = environment.mirrorZ for the planar reflection
     // pass (Z-up world). Forward direction comes from the view matrix third column.
     Mat4 reflectViewMatrix() const noexcept;
@@ -315,7 +356,7 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     void destroySwapchainResources() noexcept;
     bool createSwapchainResources();
     bool recreateSwapchain() noexcept;
-    void renderShadowMap(VkCommandBuffer buffer, const float sunMatrix[16]);
+    void renderShadowMap(VkCommandBuffer buffer, const float sunMatrix[16], std::uint32_t uniformSlot);
     // Renders the text runs of `ui` (a plain UiDrawList; the caller passes a
     // layer bucket, so this pass never sees a UiLayer).
     void renderUiText(VkCommandBuffer buffer, std::uint32_t width, std::uint32_t height, const Aporia::UiDrawList& ui);

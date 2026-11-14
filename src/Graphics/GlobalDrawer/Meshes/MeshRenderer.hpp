@@ -20,7 +20,6 @@ public:
         std::uint32_t indexCount = 0;
     };
     struct PushConstants {
-        float viewProj[16];
         float model[16];
         float color[4];
         float emissive;
@@ -36,7 +35,12 @@ public:
         const std::unordered_map<std::uint64_t, Resource>& resources,
         VkPipeline pipelineOverride = VK_NULL_HANDLE,
         const std::unordered_map<std::uint64_t, VkDescriptorSet>* materialSets = nullptr,
-        VkDescriptorSet defaultMaterialSet = VK_NULL_HANDLE) noexcept;
+        VkDescriptorSet defaultMaterialSet = VK_NULL_HANDLE,
+        // Per-item albedo sets (set 1, or set 2 under APORIA_EXPERIMENTAL).
+        // `defaultTextureSet` is the set that samples the frame-wide albedo
+        // and is bound for items without their own texture.
+        const std::unordered_map<std::uint64_t, VkDescriptorSet>* textureSets = nullptr,
+        VkDescriptorSet defaultTextureSet = VK_NULL_HANDLE) noexcept;
 
     static void destroyResource(VkDevice device, Resource& resource) noexcept;
 

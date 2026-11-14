@@ -48,10 +48,11 @@ bool readbackColorImage(const ReadbackContext& context, std::vector<std::uint8_t
         return false;
     }
 
+    const std::uint32_t texelSize = context.isHdrFormat ? 8u : 4u;
     const VkDeviceSize byteCount =
-        static_cast<VkDeviceSize>(context.width) * static_cast<VkDeviceSize>(context.height) * 4;
+        static_cast<VkDeviceSize>(context.width) * static_cast<VkDeviceSize>(context.height) * texelSize;
 
-    pixels.assign(static_cast<std::size_t>(byteCount), 0);
+    pixels.assign(static_cast<std::size_t>(context.width) * context.height * 4u, 0);
 
     VkBuffer dstBuffer = VK_NULL_HANDLE;
     VkDeviceMemory dstMemory = VK_NULL_HANDLE;

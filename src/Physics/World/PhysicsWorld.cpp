@@ -576,8 +576,12 @@ struct PhysicsWorld::Impl {
             if (body.colliderType == apr::ColliderType::Heightfield) {
                 continue;
             }
-            // Skip sleeping bodies — they won't collide with anything active.
-            if (body.sleepCounter > static_cast<int>(sleepCounterLimit)) {
+            // Only skip bodies that are both sleeping AND dynamic — static bodies
+            // never sleep and must always participate in broadphase.  Sleeping
+            // dynamic bodies are still inserted so that an active body that falls
+            // onto them triggers considerPair which wakes the sleeper.
+            const bool isStatic = body.settings.isStatic || body.settings.mass <= 0.0;
+            if (!isStatic && body.sleepCounter >= static_cast<int>(sleepCounterLimit)) {
                 continue;
             }
             std::int32_t x0, y0, z0, x1, y1, z1;
@@ -597,8 +601,11 @@ struct PhysicsWorld::Impl {
             if (first.colliderType == apr::ColliderType::Heightfield) {
                 continue;
             }
-            // Skip sleeping bodies — they won't be moved by active bodies.
-            if (first.sleepCounter > static_cast<int>(sleepCounterLimit)) {
+            // Skip sleeping bodies as the "first" in a pair — they are still in
+            // the grid so an active body that reaches them will call
+            // considerPair and wake the sleeper.  Static bodies never sleep.
+            const bool isStatic = first.settings.isStatic || first.settings.mass <= 0.0;
+            if (!isStatic && first.sleepCounter >= static_cast<int>(sleepCounterLimit)) {
                 continue;
             }
             ++pairStampCounter;

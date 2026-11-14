@@ -19,6 +19,7 @@ public:
         VkFormat format = VK_FORMAT_UNDEFINED;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
+        std::uint32_t mipLevels = 1;
         std::size_t dataSize = 0;
     };
 
@@ -27,14 +28,15 @@ public:
     // Explicit Vulkan context so the manager does not depend on Graphics::Impl.
     struct UploadContext {
         VkDevice device = VK_NULL_HANDLE;
+        VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
         VkPhysicalDeviceMemoryProperties memoryProperties{};
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         VkQueue queue = VK_NULL_HANDLE;
     };
 
-    // Uploads pixel data into an existing texture image. Transitions through
-    // TRANSFER_DST and back to SHADER_READ_ONLY, so callers pass the current
-    // layout as oldLayout.
+    // Uploads pixel data into an existing texture image and regenerates its mip
+    // chain (blit downsampling). Transitions through TRANSFER_DST and back to
+    // SHADER_READ_ONLY, so callers pass the current layout as oldLayout.
     static bool uploadTexture(
         const UploadContext& context,
         Resource& texture,
