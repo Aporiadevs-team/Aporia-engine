@@ -11,6 +11,15 @@ layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
 layout(set = 0, binding = 1) uniform sampler2D shadowMap;
 layout(set = 0, binding = 2) uniform sampler2D reflectionTexture; // mirror plane texture (screen space)
 
+// Per-item albedo. The host binds a texture per RenderItem; when an item has
+// no texture the frame-wide albedo (set 0) is bound here, so the sampled
+// result is identical to sampling albedoTexture.
+#if defined(APORIA_EXPERIMENTAL)
+layout(set = 2, binding = 0) uniform sampler2D itemTexture;
+#else
+layout(set = 1, binding = 0) uniform sampler2D itemTexture;
+#endif
+
 #if defined(APORIA_EXPERIMENTAL)
 // EXPERIMENTAL multi-layer material (set = 1). Layer 0 is the base; layers 1..3
 // blend in through the mask0 channels.
@@ -29,6 +38,7 @@ layout(set = 1, binding = 6) uniform LayerParams {
 
 layout(set = 0, binding = 3) uniform SceneUniforms {
     mat4 sunViewProj;     // world -> sun clip space
+    mat4 viewProj;        // world -> main camera clip space
     vec4 sunDirection;    // xyz toward light, w intensity
     vec4 cameraPosition;  // xyz world, w unused
     vec4 shadingParams;   // x ambient, y shadow strength, z mirror z, w shadow map texel size
@@ -42,6 +52,8 @@ layout(set = 0, binding = 3) uniform SceneUniforms {
     vec4 lightDirection[16];
     vec4 lightColor[16];
     vec4 lightParams[16];
+    vec4 fogColor;        // rgb fog colour, a density (1/m, 0 = off)
+    vec4 fogParams;       // x height falloff (1/m), y fog base height
 } scene;
 
 layout(location = 0) in vec3 fragNormal;
@@ -54,11 +66,11 @@ layout(location = 4) in vec4 fragClipPosition;   // main camera clip space
 
 layout(location = 0) out vec4 outColor;
 
-float shadowSample(vec2 uv, float depth, float compare) {
+float shadowSample(vec2 uv, float depth) {
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
         return 1.0;
     }
-    return depth - 0.0015 <= texture(shadowMap, uv).r ? 1.0 : 0.0;
+    return depth <= texture(shadowMap, uv).r ? 1.0 : 0.0;
 }
 
 float pcfShadow(vec3 normal) {
@@ -71,31 +83,32 @@ float pcfShadow(vec3 normal) {
     if (any(lessThan(projected.xy, vec2(0.0))) || any(greaterThan(projected.xy, vec2(1.0)))) {
         return 1.0;
     }
-    const float bias = max(0.00025 * (1.0 - dot(normal, scene.sunDirection.xyz)), 0.00005);
+    const float bias = 0.00006 + 0.00030 * (1.0 - clamp(dot(normal, scene.sunDirection.xyz), 0.0, 1.0));
     const float depth = projected.z - bias;
     const float texel = scene.shadingParams.w;
     float filterMode = scene.shadowParams.x;
     if (filterMode > 0.5 && filterMode < 1.5) {
-        // PCSS blocker search followed by a variable penumbra filter.
+        // PCSS: the sun is a small disc, so the penumbra stays narrow. The
+        // blocker search only needs a couple of texels around the receiver.
         float blockers = 0.0;
         float blockerDepth = 0.0;
         const int blockerCount = 16;
         for (int i = 0; i < blockerCount; ++i) {
             float a = 6.2831853 * (float(i) / float(blockerCount));
-            vec2 sampleUv = projected.xy + vec2(cos(a), sin(a)) * texel * 3.0;
+            vec2 sampleUv = projected.xy + vec2(cos(a), sin(a)) * texel * 2.0;
             float sampleDepth = texture(shadowMap, clamp(sampleUv, 0.0, 1.0)).r;
             if (sampleDepth < depth) {
                 blockers += 1.0;
                 blockerDepth += sampleDepth;
             }
         }
-        float penumbra = blockers > 0.0 ? clamp((depth - blockerDepth / blockers) * 80.0, 1.0, 5.0) : 1.0;
+        float penumbra = blockers > 0.0 ? clamp((depth - blockerDepth / blockers) * 40.0, 0.75, 2.5) : 0.75;
         float lit = 0.0;
         const int filterCount = 32;
         for (int i = 0; i < filterCount; ++i) {
             float a = 6.2831853 * (float(i) / float(filterCount));
             vec2 sampleUv = projected.xy + vec2(cos(a), sin(a)) * texel * penumbra;
-            lit += shadowSample(sampleUv, depth, 0.0);
+            lit += shadowSample(sampleUv, depth);
         }
         return mix(scene.shadingParams.y, 1.0, lit / float(filterCount));
     }
@@ -104,7 +117,7 @@ float pcfShadow(vec3 normal) {
     float total = 0.0;
     for (int dy = -radius; dy <= radius; ++dy)
         for (int dx = -radius; dx <= radius; ++dx) {
-            lit += shadowSample(projected.xy + vec2(float(dx), float(dy)) * texel, depth, 0.0);
+            lit += shadowSample(projected.xy + vec2(float(dx), float(dy)) * texel, depth);
             total += 1.0;
         }
     return mix(scene.shadingParams.y, 1.0, lit / total);
@@ -131,7 +144,7 @@ float contactShadow(vec3 normal) {
         float receiverDepth = projected.z;
         float mapDepth = texture(shadowMap, projected.xy).r;
         if (mapDepth + 0.002 < receiverDepth) {
-            visibility = min(visibility, 0.55);
+            visibility = min(visibility, 0.75);
         }
     }
     return visibility;
@@ -161,7 +174,7 @@ void main() {
     albedo = mix(albedo, texture(layerDiffuse3, uv3).rgb, mask.b);
     albedo *= fragColor.rgb;
 #else
-    vec4 albedoSample = texture(albedoTexture, fragUv);
+    vec4 albedoSample = texture(itemTexture, fragUv);
     vec3 albedo = albedoSample.rgb * fragColor.rgb;
     float texAlpha = albedoSample.a;
 #endif
@@ -171,7 +184,10 @@ void main() {
 
     float diffuse = max(dot(normal, scene.sunDirection.xyz), 0.0);
     float shadow = pcfShadow(normal) * contactShadow(normal);
-    vec3 skyAmbient = vec3(0.12, 0.15, 0.22);
+    // Hemisphere ambient: sky above, warm bounce below. Without the bounce
+    // shading, sun shadows drop to near-black on dark asphalt.
+    float upness = clamp(normal.z * 0.5 + 0.5, 0.0, 1.0);
+    vec3 skyAmbient = mix(vec3(0.20, 0.20, 0.19), vec3(0.50, 0.60, 0.80), upness);
     vec3 sunlight = vec3(1.0, 0.96, 0.86) * diffuse * shadow * scene.sunDirection.w;
     vec3 lit = albedo * (skyAmbient * scene.shadingParams.x + sunlight);
 
@@ -271,7 +287,18 @@ void main() {
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - fragWorldPosition);
     lit = planarReflection(lit, normal, viewDirection);
 
-    // Aerial in-scattering is handled by the froxel volumetric pass now; keep the
-    // surface lighting itself un-hazed so the world does not wash out with range.
+    // Analytic distance fog from WeatherState. A zero density skips the term, so
+    // a weatherless frame stays unchanged by this branch.
+    if (scene.fogColor.a > 0.0) {
+        const float viewDistance = length(scene.cameraPosition.xyz - fragWorldPosition);
+        float density = scene.fogColor.a;
+        if (scene.fogParams.x > 0.0) {
+            const float height = max(fragWorldPosition.z - scene.fogParams.y, 0.0);
+            density *= exp(-height * scene.fogParams.x);
+        }
+        const float amount = clamp(1.0 - exp(-viewDistance * density), 0.0, 1.0);
+        lit = mix(lit, scene.fogColor.rgb, amount);
+    }
+
     outColor = vec4(lit, fragColor.a * texAlpha); // linear HDR; tonemap pass converts to display
 }

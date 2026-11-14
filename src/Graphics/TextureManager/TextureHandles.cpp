@@ -52,7 +52,10 @@ bool Graphics::setTexture2D(TextureHandle handle) noexcept {
         return false;
     }
     std::string error;
-    if (!impl_->textureStore.bind(handle, impl_->scene, error)) {
+    // Pass the next frame slot so only that descriptor set is updated.
+    // Other ring slots may still be read by in-flight GPU commands.
+    const std::uint32_t frameSlot = impl_->currentFrameSlot;
+    if (!impl_->textureStore.bind(handle, impl_->scene, frameSlot, error)) {
         impl_->lastError = error;
         return false;
     }

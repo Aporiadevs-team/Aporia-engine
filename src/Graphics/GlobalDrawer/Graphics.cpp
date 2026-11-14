@@ -39,6 +39,32 @@ void Graphics::waitIdle() noexcept {
     }
 }
 
+void Graphics::setWeather(const WeatherState& weather) noexcept {
+    if (impl_) {
+        impl_->weather = weather;
+    }
+}
+
+WeatherState Graphics::weather() const noexcept {
+    return impl_ ? impl_->weather : WeatherState{};
+}
+
+#if defined(APORIA_SEASONS)
+void Graphics::setSeason(Season season) noexcept {
+    if (!impl_) {
+        return;
+    }
+    impl_->season = season;
+    impl_->seasonAtmosphere = seasonPreset(season);
+    impl_->seasonActive = true;
+    impl_->weather = impl_->seasonAtmosphere.weather;
+}
+
+Season Graphics::season() const noexcept {
+    return impl_ ? impl_->season : Season::Summer;
+}
+#endif
+
 bool Graphics::render(const CameraState& camera, const std::vector<RenderItem>& items) {
     return render(camera, EnvironmentState{}, items);
 }

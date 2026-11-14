@@ -567,7 +567,7 @@ bool QualityTargets::rebuild(const RebuildContext& rebuildContext, std::string& 
         return false;
     }
     if (ctx.reflectionsEnabled && reflectView != VK_NULL_HANDLE) {
-        ctx.scene->bindReflection(reflectView, reflectSampler);
+        ctx.scene->bindReflection(0, reflectView, reflectSampler);
     }
     return true;
 }

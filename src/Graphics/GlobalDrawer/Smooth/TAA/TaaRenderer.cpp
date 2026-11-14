@@ -46,14 +46,20 @@ void TaaRenderer::shutdown() noexcept {
         if (historyMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, historyMemory_, nullptr);
         if (historySampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, historySampler_, nullptr);
         if (depthSampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, depthSampler_, nullptr);
-        if (uniformBuffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, uniformBuffer_, nullptr);
-        if (uniformMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, uniformMemory_, nullptr);
+        for (std::uint32_t i = 0; i < kSlots; ++i) {
+            if (uniformBuffers_[i] != VK_NULL_HANDLE) vkDestroyBuffer(device_, uniformBuffers_[i], nullptr);
+            if (uniformMemories_[i] != VK_NULL_HANDLE) vkFreeMemory(device_, uniformMemories_[i], nullptr);
+        }
     }
     pipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE;
     descriptorPool_ = VK_NULL_HANDLE;
     descriptorLayout_ = VK_NULL_HANDLE;
-    descriptorSet_ = VK_NULL_HANDLE;
+    for (std::uint32_t i = 0; i < kSlots; ++i) {
+        descriptorSets_[i] = VK_NULL_HANDLE;
+        uniformBuffers_[i] = VK_NULL_HANDLE;
+        uniformMemories_[i] = VK_NULL_HANDLE;
+    }
     resolveFramebuffer_ = VK_NULL_HANDLE;
     resolveDepthView_ = VK_NULL_HANDLE;
     resolveDepthImage_ = VK_NULL_HANDLE;
@@ -66,8 +72,6 @@ void TaaRenderer::shutdown() noexcept {
     historyMemory_ = VK_NULL_HANDLE;
     historySampler_ = VK_NULL_HANDLE;
     depthSampler_ = VK_NULL_HANDLE;
-    uniformBuffer_ = VK_NULL_HANDLE;
-    uniformMemory_ = VK_NULL_HANDLE;
     width_ = 0;
     height_ = 0;
     valid_ = false;
@@ -168,12 +172,12 @@ bool TaaRenderer::initialize(const Context& context, std::uint32_t width, std::u
 
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = 3;
+    poolSizes[0].descriptorCount = 3 * kSlots;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[1].descriptorCount = 1;
+    poolSizes[1].descriptorCount = kSlots;
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
+    poolInfo.maxSets = kSlots;
     poolInfo.poolSizeCount = 2;
     poolInfo.pPoolSizes = poolSizes;
     if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool_) != VK_SUCCESS) {
@@ -182,9 +186,9 @@ bool TaaRenderer::initialize(const Context& context, std::uint32_t width, std::u
     VkDescriptorSetAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocateInfo.descriptorPool = descriptorPool_;
-    allocateInfo.descriptorSetCount = 1;
+    allocateInfo.descriptorSetCount = kSlots;
     allocateInfo.pSetLayouts = &descriptorLayout_;
-    if (vkAllocateDescriptorSets(device_, &allocateInfo, &descriptorSet_) != VK_SUCCESS) {
+    if (vkAllocateDescriptorSets(device_, &allocateInfo, descriptorSets_) != VK_SUCCESS) {
         return false;
     }
 
@@ -193,11 +197,11 @@ bool TaaRenderer::initialize(const Context& context, std::uint32_t width, std::u
     bufferInfo.size = 160; // 2 mat4 + 2 vec4
     bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device_, &bufferInfo, nullptr, &uniformBuffer_) != VK_SUCCESS) {
+    if (vkCreateBuffer(device_, &bufferInfo, nullptr, &uniformBuffers_[0]) != VK_SUCCESS) {
         return false;
     }
     VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(device_, uniformBuffer_, &requirements);
+    vkGetBufferMemoryRequirements(device_, uniformBuffers_[0], &requirements);
     std::uint32_t memoryType = 0;
     if (!findMemoryType(memoryProperties_, requirements.memoryTypeBits,
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, memoryType)) {
@@ -207,8 +211,19 @@ bool TaaRenderer::initialize(const Context& context, std::uint32_t width, std::u
     uniformAllocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     uniformAllocate.allocationSize = requirements.size;
     uniformAllocate.memoryTypeIndex = memoryType;
-    if (vkAllocateMemory(device_, &uniformAllocate, nullptr, &uniformMemory_) != VK_SUCCESS ||
-        vkBindBufferMemory(device_, uniformBuffer_, uniformMemory_, 0) != VK_SUCCESS) {
+    if (vkAllocateMemory(device_, &uniformAllocate, nullptr, &uniformMemories_[0]) != VK_SUCCESS ||
+        vkBindBufferMemory(device_, uniformBuffers_[0], uniformMemories_[0], 0) != VK_SUCCESS) {
+        return false;
+    }
+
+    // Duplicate resources for the second slot.
+    VkBufferCreateInfo dupBuf = bufferInfo;
+    if (vkCreateBuffer(device_, &dupBuf, nullptr, &uniformBuffers_[1]) != VK_SUCCESS) {
+        return false;
+    }
+    VkMemoryAllocateInfo dupAlloc = uniformAllocate;
+    if (vkAllocateMemory(device_, &dupAlloc, nullptr, &uniformMemories_[1]) != VK_SUCCESS ||
+        vkBindBufferMemory(device_, uniformBuffers_[1], uniformMemories_[1], 0) != VK_SUCCESS) {
         return false;
     }
 
@@ -224,26 +239,28 @@ bool TaaRenderer::initialize(const Context& context, std::uint32_t width, std::u
     depthInfo.sampler = depthSampler_;
     depthInfo.imageView = depthView_;
     depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkDescriptorBufferInfo uniformInfo{};
-    uniformInfo.buffer = uniformBuffer_;
-    uniformInfo.offset = 0;
-    uniformInfo.range = 160;
     std::array<VkWriteDescriptorSet, 4> writes{};
-    for (std::uint32_t index = 0; index < 4; ++index) {
-        writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[index].dstSet = descriptorSet_;
-        writes[index].dstBinding = index;
-        writes[index].descriptorCount = 1;
+    for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
+        VkDescriptorBufferInfo uniformInfo{};
+        uniformInfo.buffer = uniformBuffers_[slot];
+        uniformInfo.offset = 0;
+        uniformInfo.range = 160;
+        for (std::uint32_t index = 0; index < 4; ++index) {
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = descriptorSets_[slot];
+            writes[index].dstBinding = index;
+            writes[index].descriptorCount = 1;
+        }
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo = &currentInfo;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &historyInfo;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[2].pImageInfo = &depthInfo;
+        writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[3].pBufferInfo = &uniformInfo;
+        vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].pImageInfo = &currentInfo;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &historyInfo;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[2].pImageInfo = &depthInfo;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[3].pBufferInfo = &uniformInfo;
-    vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -312,12 +329,12 @@ bool TaaRenderer::initialize(const Context& context, std::uint32_t width, std::u
     return true;
 }
 
-bool TaaRenderer::uploadUniforms(const float prevViewProj[16], const float invViewProj[16], float blend) {
-    if (uniformMemory_ == VK_NULL_HANDLE) {
+bool TaaRenderer::uploadUniforms(std::uint32_t frameSlot, const float prevViewProj[16], const float invViewProj[16], float blend) {
+    if (frameSlot >= kSlots || uniformMemories_[frameSlot] == VK_NULL_HANDLE) {
         return false;
     }
     void* mapped = nullptr;
-    if (vkMapMemory(device_, uniformMemory_, 0, 160, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
+    if (vkMapMemory(device_, uniformMemories_[frameSlot], 0, 160, 0, &mapped) != VK_SUCCESS || mapped == nullptr) {
         return false;
     }
     struct TaaUniforms {
@@ -335,20 +352,23 @@ bool TaaRenderer::uploadUniforms(const float prevViewProj[16], const float invVi
     uniforms.resolution[0] = static_cast<float>(width_);
     uniforms.resolution[1] = static_cast<float>(height_);
     std::memcpy(mapped, &uniforms, sizeof(uniforms));
-    vkUnmapMemory(device_, uniformMemory_);
+    vkUnmapMemory(device_, uniformMemories_[frameSlot]);
     return true;
 }
 
 void TaaRenderer::record(
         VkCommandBuffer commandBuffer,
         VkImage depthImage,
+        std::uint32_t frameSlot,
         const float prevViewProj[16],
         const float invViewProj[16],
         float blend) noexcept {
     if (!valid_ || commandBuffer == VK_NULL_HANDLE) {
         return;
     }
-    uploadUniforms(prevViewProj, invViewProj, blend);
+    if (!uploadUniforms(frameSlot, prevViewProj, invViewProj, blend)) {
+        return;
+    }
 
     const VkImageLayout historyOldLayout = historyValid_
         ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
@@ -403,7 +423,7 @@ void TaaRenderer::record(
     vkCmdSetScissor(commandBuffer, 0, 1, &taaScissor);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
+                            pipelineLayout_, 0, 1, &descriptorSets_[frameSlot], 0, nullptr);
     vkCmdDraw(commandBuffer, 4, 1, 0, 0);
     vkCmdEndRenderPass(commandBuffer);
 

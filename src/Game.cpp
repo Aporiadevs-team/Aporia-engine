@@ -58,7 +58,17 @@ bool Game::initGraphics(const GraphicsContext& context, const GraphicsConfig& co
         }
     }
 #endif
-    return graphics_.initialize(context, config);
+    if (!graphics_.initialize(context, config)) {
+        return false;
+    }
+
+    // Register component types once instead of on every createBody() call.
+    transformType_ = scene_.registerComponentType("Transform");
+    meshRefType_ = scene_.registerComponentType("MeshRef");
+#if defined(APORIA_ENGINE_HAS_PHYSICS)
+    physicsRefType_ = scene_.registerComponentType("PhysicsRef");
+#endif
+    return true;
 }
 
 Body Game::createBody(const BodyDesc& description) {
@@ -91,10 +101,8 @@ Body Game::createBody(const BodyDesc& description) {
     }
 
     ObjectHandle object = scene_.createObject(description.name);
-    const ComponentTypeId transformType = scene_.registerComponentType("Transform");
-    const ComponentTypeId meshType = scene_.registerComponentType("MeshRef");
-    scene_.addComponent(object, transformType, Transform{description.transform});
-    scene_.addComponent(object, meshType, MeshRef{result.mesh_});
+    scene_.addComponent(object, transformType_, Transform{description.transform});
+    scene_.addComponent(object, meshRefType_, MeshRef{result.mesh_});
 
 #if defined(APORIA_ENGINE_HAS_PHYSICS)
     if (!description.physicsDisabled) {
@@ -149,8 +157,7 @@ Body Game::createBody(const BodyDesc& description) {
         }
 
         if (result.body_.valid()) {
-            const ComponentTypeId physicsType = scene_.registerComponentType("PhysicsRef");
-            scene_.addComponent(object, physicsType, PhysicsRef{result.body_});
+            scene_.addComponent(object, physicsRefType_, PhysicsRef{result.body_});
         }
     }
 #endif
@@ -165,9 +172,7 @@ void Game::destroyBody(BodyHandle handle) noexcept {
     }
 
     // Find the scene object that owns this physics body.
-    const ComponentTypeId physicsType = scene_.componentTypeId("PhysicsRef");
-    const ComponentTypeId meshType = scene_.componentTypeId("MeshRef");
-    if (physicsType == invalidComponentType) {
+    if (physicsRefType_ == invalidComponentType) {
         return;
     }
 
@@ -176,15 +181,15 @@ void Game::destroyBody(BodyHandle handle) noexcept {
 
     for (const Scene::ComponentView& view : scene_.components()) {
         const ObjectHandle obj{view.objectId};
-        const PhysicsRef* ref = scene_.findComponent<PhysicsRef>(obj, physicsType);
+        const PhysicsRef* ref = scene_.findComponent<PhysicsRef>(obj, physicsRefType_);
         if (ref != nullptr && ref->body.value == handle.value) {
             targetObject = obj;
-            const Transform* transform = scene_.findComponent<Transform>(obj, scene_.componentTypeId("Transform"));
+            const Transform* transform = scene_.findComponent<Transform>(obj, transformType_);
             if (transform == nullptr) {
                 return; // invalid state
             }
             // Find the mesh component on the same object.
-            const MeshRef* meshRef = scene_.findComponent<MeshRef>(obj, meshType);
+            const MeshRef* meshRef = scene_.findComponent<MeshRef>(obj, meshRefType_);
             if (meshRef != nullptr) {
                 targetMesh = meshRef->mesh;
             }
@@ -216,20 +221,17 @@ Body Game::createTerrain(const TerrainDesc& description) {
     result.body_ = physics_.createHeightfield(description, field);
 
     ObjectHandle object = scene_.createObject("terrain");
-    const ComponentTypeId transformType = scene_.registerComponentType("Transform");
-    scene_.addComponent(object, transformType, Transform{description.position, description.orientation, Vec3{1.0, 1.0, 1.0}});
+    scene_.addComponent(object, transformType_, Transform{description.position, description.orientation, Vec3{1.0, 1.0, 1.0}});
 
     if (graphics_.initialized()) {
         result.mesh_ = graphics_.createMesh(makeTerrainMesh(field));
-        const ComponentTypeId meshType = scene_.registerComponentType("MeshRef");
         if (result.mesh_.valid()) {
-            scene_.addComponent(object, meshType, MeshRef{result.mesh_});
+            scene_.addComponent(object, meshRefType_, MeshRef{result.mesh_});
         }
     }
 
     if (result.body_.valid()) {
-        const ComponentTypeId physicsType = scene_.registerComponentType("PhysicsRef");
-        scene_.addComponent(object, physicsType, PhysicsRef{result.body_});
+        scene_.addComponent(object, physicsRefType_, PhysicsRef{result.body_});
     }
 
     result.object_ = object;
@@ -244,6 +246,24 @@ void Game::setCamera(const CameraState& camera) noexcept {
 CameraState Game::camera() const noexcept {
     return camera_;
 }
+
+void Game::setWeather(const WeatherState& weather) noexcept {
+    graphics_.setWeather(weather);
+}
+
+WeatherState Game::weather() const noexcept {
+    return graphics_.weather();
+}
+
+#if defined(APORIA_SEASONS)
+void Game::setSeason(Season season) noexcept {
+    graphics_.setSeason(season);
+}
+
+Season Game::season() const noexcept {
+    return graphics_.season();
+}
+#endif
 } // namespace Aporia
 #endif
 
@@ -340,19 +360,17 @@ void Game::advanceFixedStep() noexcept {
 
 void Game::syncTransforms() noexcept {
 #if defined(APORIA_ENGINE_HAS_PHYSICS)
-    const ComponentTypeId transformType = scene_.componentTypeId("Transform");
-    const ComponentTypeId physicsType = scene_.componentTypeId("PhysicsRef");
-    if (transformType == invalidComponentType || physicsType == invalidComponentType) {
+    if (transformType_ == invalidComponentType || physicsRefType_ == invalidComponentType) {
         return;
     }
 
     for (const Scene::ComponentView& view : scene_.components()) {
-        if (view.type != physicsType) {
+        if (view.type != physicsRefType_) {
             continue;
         }
         const ObjectHandle object{view.objectId};
-        const PhysicsRef* reference = scene_.findComponent<PhysicsRef>(object, physicsType);
-        Transform* transform = scene_.findComponent<Transform>(object, transformType);
+        const PhysicsRef* reference = scene_.findComponent<PhysicsRef>(object, physicsRefType_);
+        Transform* transform = scene_.findComponent<Transform>(object, transformType_);
         if (reference == nullptr || transform == nullptr || !reference->body.valid()) {
             continue;
         }

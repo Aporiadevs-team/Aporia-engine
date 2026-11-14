@@ -26,6 +26,16 @@ bool findMemoryType(
     return false;
 }
 
+std::uint32_t mipLevelCount(std::uint32_t width, std::uint32_t height) noexcept {
+    std::uint32_t levels = 1;
+    while (width > 1 || height > 1) {
+        width = std::max(1u, width / 2);
+        height = std::max(1u, height / 2);
+        ++levels;
+    }
+    return levels;
+}
+
 } // namespace
 
 bool TextureManager::uploadTexture(
@@ -38,6 +48,7 @@ bool TextureManager::uploadTexture(
         pixels == nullptr || dataSize == 0 || dataSize != texture.dataSize) {
         return false;
     }
+    const std::uint32_t mipLevels = texture.mipLevels == 0 ? 1u : texture.mipLevels;
 
     VkBuffer stagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
@@ -122,22 +133,122 @@ bool TextureManager::uploadTexture(
     vkCmdCopyBufferToImage(context.commandBuffer, stagingBuffer, texture.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
+    // Mip chain: blit each level from the previous one. Without it every
+    // minified texture (terrain albedo seen along the ground, distant city)
+    // samples level 0 and thrashes the texture cache — the frame rate collapses
+    // as soon as the camera goes low.
+    VkFormatFeatureFlags formatFeatures = 0;
+    if (context.physicalDevice != VK_NULL_HANDLE) {
+        VkFormatProperties formatProperties{};
+        vkGetPhysicalDeviceFormatProperties(context.physicalDevice, texture.format,
+                                            &formatProperties);
+        formatFeatures = formatProperties.optimalTilingFeatures;
+    }
+    const VkFormatFeatureFlags blitRequired =
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    const bool canBlitMips = mipLevels > 1 &&
+        (context.physicalDevice == VK_NULL_HANDLE ||
+         (formatFeatures & blitRequired) == blitRequired);
+    const VkFilter mipFilter =
+        (formatFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0
+            ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+
+    // Level 0 becomes the source for the first downsample.
+    VkImageMemoryBarrier level0ToSrc{};
+    level0ToSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    level0ToSrc.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    level0ToSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    level0ToSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    level0ToSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    level0ToSrc.image = texture.image;
+    level0ToSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    level0ToSrc.subresourceRange.baseMipLevel = 0;
+    level0ToSrc.subresourceRange.levelCount = 1;
+    level0ToSrc.subresourceRange.layerCount = 1;
+    level0ToSrc.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    level0ToSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(context.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &level0ToSrc);
+
+    if (canBlitMips) {
+        // Levels 1..N-1 still sit in their pre-upload layout.
+        VkImageMemoryBarrier mipToDst = level0ToSrc;
+        mipToDst.oldLayout = oldLayout;
+        mipToDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        mipToDst.subresourceRange.baseMipLevel = 1;
+        mipToDst.subresourceRange.levelCount = mipLevels - 1;
+        mipToDst.srcAccessMask = oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            ? VK_ACCESS_SHADER_READ_BIT : 0;
+        mipToDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(
+            context.commandBuffer,
+            oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &mipToDst);
+
+        for (std::uint32_t level = 1; level < mipLevels; ++level) {
+            const std::uint32_t srcWidth = std::max(1u, texture.width >> (level - 1));
+            const std::uint32_t srcHeight = std::max(1u, texture.height >> (level - 1));
+            const std::uint32_t dstWidth = std::max(1u, texture.width >> level);
+            const std::uint32_t dstHeight = std::max(1u, texture.height >> level);
+            VkImageBlit blit{};
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = level - 1;
+            blit.srcSubresource.layerCount = 1;
+            blit.srcOffsets[1] = {static_cast<std::int32_t>(srcWidth),
+                                  static_cast<std::int32_t>(srcHeight), 1};
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = level;
+            blit.dstSubresource.layerCount = 1;
+            blit.dstOffsets[1] = {static_cast<std::int32_t>(dstWidth),
+                                  static_cast<std::int32_t>(dstHeight), 1};
+            vkCmdBlitImage(context.commandBuffer, texture.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, texture.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, mipFilter);
+
+            // This level is the source for the next downsample.
+            VkImageMemoryBarrier levelDone = level0ToSrc;
+            levelDone.subresourceRange.baseMipLevel = level;
+            vkCmdPipelineBarrier(context.commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                                 1, &levelDone);
+        }
+    }
+
     VkImageMemoryBarrier toRead{};
     toRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toRead.image = texture.image;
     toRead.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    toRead.subresourceRange.levelCount = 1;
+    toRead.subresourceRange.levelCount = canBlitMips ? mipLevels : 1;
     toRead.subresourceRange.layerCount = 1;
-    toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toRead.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(
         context.commandBuffer,
         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &toRead);
+
+    if (mipLevels > 1 && !canBlitMips) {
+        // No blit support: upper levels keep whatever the device gives them,
+        // but they must at least end up in a sampleable layout.
+        VkImageMemoryBarrier leftover = toRead;
+        leftover.oldLayout = oldLayout;
+        leftover.subresourceRange.baseMipLevel = 1;
+        leftover.subresourceRange.levelCount = mipLevels - 1;
+        leftover.srcAccessMask = oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            ? VK_ACCESS_SHADER_READ_BIT : 0;
+        vkCmdPipelineBarrier(
+            context.commandBuffer,
+            oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+            &leftover);
+    }
 
     if (vkEndCommandBuffer(context.commandBuffer) != VK_SUCCESS) {
         destroyStaging();
@@ -226,16 +337,19 @@ bool TextureManager::createResource(
         effective.dataSize = downscaled.size();
     }
 
+    const std::uint32_t mipLevels = mipLevelCount(effective.width, effective.height);
+
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
     imageInfo.format = vulkanFormat;
     imageInfo.extent = {effective.width, effective.height, 1};
-    imageInfo.mipLevels = 1;
+    imageInfo.mipLevels = mipLevels;
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(context.device, &imageInfo, nullptr, &texture.image) != VK_SUCCESS) {
@@ -267,7 +381,7 @@ bool TextureManager::createResource(
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = vulkanFormat;
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.levelCount = mipLevels;
     viewInfo.subresourceRange.layerCount = 1;
     if (vkCreateImageView(context.device, &viewInfo, nullptr, &texture.view) != VK_SUCCESS) {
         destroyResource(context.device, texture);
@@ -290,7 +404,7 @@ bool TextureManager::createResource(
     samplerInfo.addressModeU = addressMode;
     samplerInfo.addressModeV = addressMode;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.maxLod = 1.0f;
+    samplerInfo.maxLod = static_cast<float>(mipLevels - 1);
     if (vkCreateSampler(context.device, &samplerInfo, nullptr, &texture.sampler) != VK_SUCCESS) {
         destroyResource(context.device, texture);
         return false;
@@ -300,9 +414,11 @@ bool TextureManager::createResource(
     texture.width = effective.width;
     texture.height = effective.height;
     texture.dataSize = effective.dataSize;
+    texture.mipLevels = mipLevels;
 
     UploadContext upload;
     upload.device = context.device;
+    upload.physicalDevice = context.physicalDevice;
     upload.memoryProperties = context.memoryProperties;
     upload.commandBuffer = context.commandBuffer;
     upload.queue = context.queue;

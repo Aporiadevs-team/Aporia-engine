@@ -190,32 +190,30 @@ bool SceneBindings::writeUniforms(std::uint32_t slot, const void* data, std::siz
 }
 
 void SceneBindings::writeImage(
-        std::uint32_t binding, VkImageView view, VkSampler sampler, VkImageLayout layout) noexcept {
+        std::uint32_t frameSlot, std::uint32_t binding, VkImageView view, VkSampler sampler, VkImageLayout layout) noexcept {
+    if (frameSlot >= kSlots || sets_[frameSlot] == VK_NULL_HANDLE) {
+        return;
+    }
     VkDescriptorImageInfo imageInfo{};
     imageInfo.sampler = sampler;
     imageInfo.imageView = view;
     imageInfo.imageLayout = layout;
-    for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
-        if (sets_[slot] == VK_NULL_HANDLE) {
-            continue;
-        }
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = sets_[slot];
-        write.dstBinding = binding;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.descriptorCount = 1;
-        write.pImageInfo = &imageInfo;
-        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
-    }
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = sets_[frameSlot];
+    write.dstBinding = binding;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.descriptorCount = 1;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 }
 
-void SceneBindings::bindAlbedo(VkImageView view, VkSampler sampler) noexcept {
-    writeImage(0, view, sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+void SceneBindings::bindAlbedo(std::uint32_t frameSlot, VkImageView view, VkSampler sampler) noexcept {
+    writeImage(frameSlot, 0, view, sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
-void SceneBindings::bindReflection(VkImageView view, VkSampler sampler) noexcept {
-    writeImage(2, view, sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+void SceneBindings::bindReflection(std::uint32_t frameSlot, VkImageView view, VkSampler sampler) noexcept {
+    writeImage(frameSlot, 2, view, sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 } // namespace Aporia::graphics_internal

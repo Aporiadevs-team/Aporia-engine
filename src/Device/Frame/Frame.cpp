@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -82,6 +83,7 @@ bool Graphics::renderFrame() noexcept {
             : impl_->avgFrameMs * smoothing + milliseconds * (1.0 - smoothing);
         frameSeconds = milliseconds / 1000.0;
     }
+    impl_->frameDeltaSeconds = static_cast<float>(frameSeconds);
     impl_->timeManager.update(frameSeconds);
     return submitted;
 }
@@ -162,8 +164,10 @@ bool Graphics::renderNativeFrame() noexcept {
 #if defined(_WIN32)
     VkExtent2D windowExtent{};
     if (!getWindowExtent(impl_->window, windowExtent)) {
-        impl_->lastError = "Native window has no drawable client area";
-        return false;
+        // Minimized (or transiently client-less) window: there is nothing to
+        // present. Skip the frame gracefully instead of failing the render —
+        // a false return would end the caller's main loop.
+        return true;
     }
     if (windowExtent.width != impl_->swapchainExtent.width ||
         windowExtent.height != impl_->swapchainExtent.height) {
@@ -334,6 +338,15 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     const std::unordered_map<std::uint64_t, VkDescriptorSet>* materialSetsArg = nullptr;
     const VkDescriptorSet defaultMaterialArg = VK_NULL_HANDLE;
 #endif
+    // Per-item textures: allocate one fixed descriptor set per referenced
+    // texture before recording, so the mesh pass can bind set 1/2 per item.
+    for (const RenderItem& item : pendingItems) {
+        if (item.texture.valid()) {
+            textureStore.setFor(item.texture);
+        }
+    }
+    const auto* textureSetsArg = &textureStore.descriptorSets();
+    const VkDescriptorSet defaultTextureArg = textureStore.descriptorSet();
     if (timeDrivenSun) {
         // Sun follows the time-of-day clock: sunrise east, noon zenith, sunset west.
         float sunDir[3];
@@ -347,6 +360,9 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         float t = (e + 0.05f) / 0.30f;
         t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
         environment.sunIntensity = t * t * (3.0f - 2.0f * t);
+        // The sky darkens at night, so the hemisphere ambient must follow it:
+        // otherwise a sunless scene stays lit like an overcast afternoon.
+        nightAmbientScale = 0.08f + 0.92f * environment.sunIntensity;
     }
 
     float sunMatrix[16];
@@ -374,11 +390,18 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         skyUniforms.sunDirection[0] = environment.sunDirection[0];
         skyUniforms.sunDirection[1] = environment.sunDirection[1];
         skyUniforms.sunDirection[2] = environment.sunDirection[2];
-        skyUniforms.sunDirection[3] = environment.sunIntensity;
+        skyUniforms.sunDirection[3] = effectiveSunIntensity();
         skyUniforms.sunColor[0] = 1.0f;
         skyUniforms.sunColor[1] = 0.94f;
         skyUniforms.sunColor[2] = 0.82f;
         skyUniforms.sunColor[3] = 1.0f;
+#if defined(APORIA_SEASONS)
+        if (seasonActive) {
+            skyUniforms.sunColor[0] = seasonAtmosphere.sunColor[0];
+            skyUniforms.sunColor[1] = seasonAtmosphere.sunColor[1];
+            skyUniforms.sunColor[2] = seasonAtmosphere.sunColor[2];
+        }
+#endif
         skyUniforms.skyParams[0] = 0.5f;  // horizon exponent
         skyUniforms.skyParams[1] = 0.45f; // haze
         skyUniforms.skyParams[2] = 1.0f;  // glow
@@ -404,6 +427,23 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         skyUniforms.twilight[0] = morning ? 0.98f : 0.97f;
         skyUniforms.twilight[1] = morning ? 0.86f : 0.62f;
         skyUniforms.twilight[2] = morning ? 0.55f : 0.52f;
+#if defined(APORIA_SEASONS)
+        if (seasonActive) {
+            skyUniforms.seasonSky[0] = seasonAtmosphere.skyZenithTint[0];
+            skyUniforms.seasonSky[1] = seasonAtmosphere.skyZenithTint[1];
+            skyUniforms.seasonSky[2] = seasonAtmosphere.skyZenithTint[2];
+            skyUniforms.seasonSky[3] = seasonAtmosphere.skyTintStrength;
+            skyUniforms.seasonHaze[0] = seasonAtmosphere.skyHorizonTint[0];
+            skyUniforms.seasonHaze[1] = seasonAtmosphere.skyHorizonTint[1];
+            skyUniforms.seasonHaze[2] = seasonAtmosphere.skyHorizonTint[2];
+        }
+        if (weather.fogDensity > 0.0f) {
+            skyUniforms.fog[0] = weather.fogColor[0];
+            skyUniforms.fog[1] = weather.fogColor[1];
+            skyUniforms.fog[2] = weather.fogColor[2];
+            skyUniforms.fog[3] = 1.0f - std::exp(-weather.fogDensity * 150.0f);
+        }
+#endif
         sky.writeUniforms(device, uniformSlot, skyUniforms);
     }
     
@@ -415,13 +455,13 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     if (recordShadow && multithreadedRender && jobs && shadowCmd != VK_NULL_HANDLE) {
         float shadowSunMatrix[16];
         std::memcpy(shadowSunMatrix, sunMatrix, sizeof(shadowSunMatrix));
-        jobs->submit([this, shadowCmd, shadowSunMatrix]() {
+        jobs->submit([this, shadowCmd, shadowSunMatrix, uniformSlot]() {
             vkResetCommandBuffer(shadowCmd, 0);
             VkCommandBufferBeginInfo info{};
             info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             if (vkBeginCommandBuffer(shadowCmd, &info) == VK_SUCCESS) {
-                renderShadowMap(shadowCmd, shadowSunMatrix);
+                renderShadowMap(shadowCmd, shadowSunMatrix, uniformSlot);
                 vkEndCommandBuffer(shadowCmd);
                 // Signal main thread: shadow recording completed successfully.
                 shadowRecordedThisFrame.store(true, std::memory_order_release);
@@ -430,16 +470,22 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             // each frame so a stale true is never possible).
         });
     } else if (recordShadow) {
-        renderShadowMap(cmd, sunMatrix);
+        renderShadowMap(cmd, sunMatrix, uniformSlot);
     }
 #else
     if (recordShadow) {
-        renderShadowMap(cmd, sunMatrix);
+        renderShadowMap(cmd, sunMatrix, uniformSlot);
     }
 #endif
 
+    // Always emit the shadow barrier when we intend to render shadows this
+    // frame.  The barrier flushes the shadow writes (DEPTH_STENCIL_ATTACHMENT_WRITE)
+    // so they become visible to fragment shaders reading the shadow map.
+    // If the worker hasn't finished yet the barrier is a harmless no-op (layout
+    // doesn't change, no shader reads happen until the command buffer is
+    // submitted and the GPU actually reaches the fragment stage).
 #if defined(APORIA_EXPERIMENTAL)
-    if (shadowRecordedThisFrame.load(std::memory_order_acquire)) {
+    if (recordShadow) {
         VkImageMemoryBarrier shadowBarrier{};
         shadowBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         shadowBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -517,7 +563,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             inject.sunDirection[0] = environment.sunDirection[0];
             inject.sunDirection[1] = environment.sunDirection[1];
             inject.sunDirection[2] = environment.sunDirection[2];
-            inject.sunDirection[3] = environment.sunIntensity;
+            inject.sunDirection[3] = effectiveSunIntensity();
             inject.sunColor[0] = 1.0f;
             inject.sunColor[1] = 0.94f;
             inject.sunColor[2] = 0.82f;
@@ -613,7 +659,8 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         graphics_internal::MeshRenderer::renderMeshes(
             reflectMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
             scene.set(uniformSlot), reflectViewProj,
-            pendingItems, meshStore.resources(), VK_NULL_HANDLE, materialSetsArg, defaultMaterialArg);
+            pendingItems, meshStore.resources(), VK_NULL_HANDLE, materialSetsArg, defaultMaterialArg,
+            textureSetsArg, defaultTextureArg);
         vkEndCommandBuffer(reflectMeshCb);
         haveReflectMesh = true;
     }
@@ -645,7 +692,8 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
                 graphics_internal::MeshRenderer::renderMeshes(
                     mainMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
                     scene.set(uniformSlot), pendingViewProj,
-                    opaqueItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
+                    opaqueItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg,
+                    textureSetsArg, defaultTextureArg);
             }
             const VkPipeline transparentPipeline =
                 useHdr ? pipelines.hdrMeshTransparentPipeline : pipelines.meshTransparentPipeline;
@@ -653,12 +701,33 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
                 graphics_internal::MeshRenderer::renderMeshes(
                     mainMeshCb, pipelines.meshPipeline, pipelines.meshPipelineLayout,
                     scene.set(uniformSlot), pendingViewProj,
-                    transparentItems, meshStore.resources(), transparentPipeline, materialSetsArg, defaultMaterialArg);
+                    transparentItems, meshStore.resources(), transparentPipeline, materialSetsArg, defaultMaterialArg,
+                    textureSetsArg, defaultTextureArg);
             }
         }
         vkEndCommandBuffer(mainMeshCb);
         haveMainMesh = true;
     }
+
+    // Precipitation batch: simulate once, upload once, draw once. It runs after
+    // the opaque/transparent meshes so the depth test occludes particles behind
+    // geometry, and its blend target matches the active scene pass.
+#if defined(APORIA_SEASONS)
+    VkCommandBuffer precipitationCb = secondaryBuffers[slotIndex][kSecondaryPrecipitation];
+    bool havePrecipitation = false;
+    if (precipitation.valid()) {
+        precipitation.update(uniformSlot, weather, pendingCamera.position, frameDeltaSeconds);
+        if (precipitation.particleCount() > 0 &&
+            beginSecondary(precipitationCb, mainRenderPass, mainFramebuffer)) {
+            setViewportScissor(precipitationCb, mainWidth, mainHeight);
+            precipitation.record(precipitationCb, useHdr, uniformSlot, pendingCamera.viewMatrix,
+                                 pendingViewProj, pendingCamera.position, weather.fogColor,
+                                 weather.fogDensity);
+            vkEndCommandBuffer(precipitationCb);
+            havePrecipitation = true;
+        }
+    }
+#endif
     
 
     // The glass panels sample a pre-blurred half-res copy of the scene. TAA
@@ -779,7 +848,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
                 sunScreenX = (cx / cw) * 0.5f + 0.5f;
                 sunScreenY = (cy / cw) * 0.5f + 0.5f;
                 if (sunScreenX > 0.0f && sunScreenX < 1.0f && sunScreenY > 0.0f && sunScreenY < 1.0f) {
-                    raysVisible = environment.sunIntensity;
+                    raysVisible = effectiveSunIntensity();
                 }
             }
         }
@@ -860,7 +929,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         begin.pClearValues = clearValues.data();
         vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 
-        VkCommandBuffer mainCommands[4]{};
+        VkCommandBuffer mainCommands[5]{};
         std::uint32_t mainCommandCount = 0;
         if (haveSky) {
             mainCommands[mainCommandCount++] = skyCb;
@@ -868,6 +937,11 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         if (haveMainMesh) {
             mainCommands[mainCommandCount++] = mainMeshCb;
         }
+#if defined(APORIA_SEASONS)
+        if (havePrecipitation) {
+            mainCommands[mainCommandCount++] = precipitationCb;
+        }
+#endif
         // UI must composite at every quality; without HDR the tonemap pass does
         // not run, so execute the UI secondaries straight into the main pass.
         if (!useHdr) {
@@ -887,7 +961,7 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
     const bool taaActive =
         useHdr && static_cast<AntiAliasingMode>(antiAliasing) == AntiAliasingMode::TAA && taa.valid();
     if (taaActive) {
-        taa.record(cmd, hdrDepthImage, taaPrevViewProj, taaInvViewProj, antiAliasingStrength);
+        taa.record(cmd, hdrDepthImage, slotIndex, taaPrevViewProj, taaInvViewProj, antiAliasingStrength);
     }
 
 #if defined(APORIA_EXPERIMENTAL)
@@ -1053,6 +1127,19 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
             graphics_internal::HdrRenderer::renderTonemap(targetContext, targetFramebuffer, width, height,
                                                           &presentCb, 1);
         }
+    } else {
+        // No backdrop blur: composite the HDR scene (and the layered UI) straight
+        // into the swapchain target. Without this branch the scene never leaves
+        // the HDR target and the window shows only the cleared swapchain image.
+        if (uiBlurActive) {
+            imageBarrier(hdrImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            recordBlurChain(tonemapDescriptorSet);
+        }
+        if (useHdr && haveTonemap) {
+            renderTonemap(cmd, targetFramebuffer, width, height);
+        }
     }
 #else
         if (uiBlurActive) {
@@ -1083,14 +1170,15 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
 void Graphics::Impl::writeSceneUniforms(std::uint32_t slot, const float sunMatrix[16]) {
     SceneUniforms uniforms{};
     std::memcpy(uniforms.sunViewProj, sunMatrix, sizeof(uniforms.sunViewProj));
+    std::memcpy(uniforms.viewProj, pendingViewProj, sizeof(uniforms.viewProj));
     uniforms.sunDirection[0] = environment.sunDirection[0];
     uniforms.sunDirection[1] = environment.sunDirection[1];
     uniforms.sunDirection[2] = environment.sunDirection[2];
-    uniforms.sunDirection[3] = environment.sunIntensity;
+    uniforms.sunDirection[3] = effectiveSunIntensity();
     uniforms.cameraPosition[0] = static_cast<float>(pendingCamera.position[0]);
     uniforms.cameraPosition[1] = static_cast<float>(pendingCamera.position[1]);
     uniforms.cameraPosition[2] = static_cast<float>(pendingCamera.position[2]);
-    uniforms.shadingParams[0] = environment.ambient;
+    uniforms.shadingParams[0] = effectiveAmbient() * nightAmbientScale;
     uniforms.shadingParams[1] = shadowsEnabled ? shadowStrength : 1.0f;
     uniforms.shadingParams[2] = environment.mirrorZ;
     uniforms.shadingParams[3] = shadowMapSize > 0 ? 1.0f / static_cast<float>(shadowMapSize) : 0.0f;
@@ -1100,6 +1188,16 @@ void Graphics::Impl::writeSceneUniforms(std::uint32_t slot, const float sunMatri
     uniforms.shadowParams[1] = static_cast<float>(shadowConfig.blockerSamples);
     uniforms.shadowParams[2] = static_cast<float>(shadowConfig.filterSamples);
     uniforms.shadowParams[3] = shadowConfig.contactShadows ? shadowConfig.contactDistance : 0.0f;
+
+#if defined(APORIA_SEASONS)
+    // Fog stays disabled (density 0) unless the host submits weather.
+    uniforms.fogColor[0] = weather.fogColor[0];
+    uniforms.fogColor[1] = weather.fogColor[1];
+    uniforms.fogColor[2] = weather.fogColor[2];
+    uniforms.fogColor[3] = weather.fogDensity > 0.0f ? weather.fogDensity : 0.0f;
+    uniforms.fogParams[0] = weather.fogHeightFalloff > 0.0f ? weather.fogHeightFalloff : 0.0f;
+    uniforms.fogParams[1] = 0.0f;
+#endif
 
     const std::uint32_t lightCount = lightStore.count();
     const std::uint32_t activeLights = lightCount < maxLights ? lightCount : maxLights;
@@ -1111,6 +1209,12 @@ void Graphics::Impl::writeSceneUniforms(std::uint32_t slot, const float sunMatri
         std::memcpy(uniforms.lightParams[index], lightStore.params[index], sizeof(uniforms.lightParams[index]));
     }
     scene.writeUniforms(slot, &uniforms, sizeof(uniforms));
+    if (frameCount % 60 == 0) {
+        engineLog("[shadow] sun=%.3f,%.3f,%.3f int=%.3f amb=%.3f str=%.3f map=%u ext=%.1f sunVP.r0=%.3f,%.3f,%.3f",
+                  environment.sunDirection[0], environment.sunDirection[1], environment.sunDirection[2],
+                  environment.sunIntensity, uniforms.shadingParams[0], uniforms.shadingParams[1],
+                  shadowMapSize, shadowExtent, sunMatrix[0], sunMatrix[1], sunMatrix[2]);
+    }
 }
 
 void Graphics::Impl::destroyDepthResources() noexcept {

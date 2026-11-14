@@ -1,7 +1,6 @@
 #version 450
 
 layout(push_constant) uniform PushConstants {
-    mat4 viewProj;
     mat4 model;
     vec4 color;
     float emissive;
@@ -21,6 +20,7 @@ layout(location = 4) out vec4 fragClipPosition;
 
 layout(set = 0, binding = 3) uniform SceneUniforms {
     mat4 sunViewProj;
+    mat4 viewProj;
     vec4 sunDirection;
     vec4 cameraPosition;
     vec4 shadingParams;
@@ -30,7 +30,7 @@ layout(set = 0, binding = 3) uniform SceneUniforms {
 
 void main() {
     vec4 worldPosition = pc.model * vec4(inPosition, 1.0);
-    gl_Position = pc.viewProj * worldPosition;
+    gl_Position = scene.viewProj * worldPosition;
     fragNormal = normalize(mat3(pc.model) * inNormal);
     fragUv = inUv;
     fragColor = pc.color;

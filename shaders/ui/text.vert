@@ -1,14 +1,15 @@
 #version 450
 
-// Uniform-driven text quads: no vertex buffer, each glyph is 6 vertices
+// Storage-buffer-driven text quads: no vertex buffer, each glyph is 6 vertices
 // generated from gl_VertexIndex. FontData layout must match
 // Aporia::graphics_internal::TextRenderer.
 //
 // Layout: 4 vec4 header (64 B) + per-glyph data stored as 4 consecutive vec4s
 // (64 B per glyph).  MaxGlyphs = 2048 ⇒ 2048 × 64 = 131 072 B after header,
 // total = 131 136 B.  chars[] must hold 2048 × 4 = 8192 entries.
+// SSBO (storage buffer) has 128 MiB minimum — no UBO 64 KB limit.
 
-layout(set = 0, binding = 0) uniform FontData {
+layout(set = 0, binding = 0, std430) buffer FontData {
     vec4 screenData;    // xy = screen size, z = guiScale, w = outlineWidth
     vec4 outlineColor;  // rgba
     vec4 atlasData;     // xy = atlas size, z = distanceRange, w = fontSize
