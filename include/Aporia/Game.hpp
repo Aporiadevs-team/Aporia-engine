@@ -49,6 +49,11 @@ public:
     // if graphics is not initialized or mesh creation failed.
     Body createBody(const BodyDesc& description);
 
+    // Destroy a body created via createBody(). Removes the physics body (when
+    // physics is enabled), the scene object and all its components (Transform,
+    // MeshRef, PhysicsRef). Invalidates the returned Body handle.
+    void destroyBody(BodyHandle handle) noexcept;
+
 #if defined(APORIA_ENGINE_HAS_PHYSICS)
     // Stage B terrain: generates the heightfield, creates the render mesh and
     // the static heightfield collider, returns them as a Body. The mesh is
@@ -59,6 +64,17 @@ public:
 
     void setCamera(const CameraState& camera) noexcept;
     [[nodiscard]] CameraState camera() const noexcept;
+
+    // Weather for the next frames (precipitation, wind, fog). The default state
+    // is clear and renders exactly like a weatherless frame.
+    void setWeather(const WeatherState& weather) noexcept;
+    [[nodiscard]] WeatherState weather() const noexcept;
+
+#if defined(APORIA_SEASONS)
+    // Applies the season's atmosphere preset; setWeather() can override it.
+    void setSeason(Season season) noexcept;
+    [[nodiscard]] Season season() const noexcept;
+#endif
 #endif
 
 #if defined(APORIA_ENGINE_HAS_INPUT)
@@ -96,6 +112,12 @@ private:
     double accumulator_ = 0.0;
     std::uint32_t maxSubsteps_ = 8;
     std::uint32_t lastSubstepCount_ = 0;
+
+#if defined(APORIA_ENGINE_HAS_GRAPHICS)
+    ComponentTypeId transformType_ = invalidComponentType;
+    ComponentTypeId meshRefType_ = invalidComponentType;
+    ComponentTypeId physicsRefType_ = invalidComponentType;
+#endif
 };
 
 }

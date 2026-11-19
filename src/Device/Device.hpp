@@ -77,6 +77,13 @@ public:
         VkCommandPool pool,
         VkCommandBuffer& outBuffer) noexcept;
 
+    // Allocates a secondary command buffer (recorded with
+    // VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT and executed by a primary).
+    static bool createSecondaryCommandBuffer(
+        VkDevice device,
+        VkCommandPool pool,
+        VkCommandBuffer& outBuffer) noexcept;
+
     struct FrameSync {
         VkSemaphore acquire[MaxFramesInFlight] = {};
         VkSemaphore renderFinished[MaxFramesInFlight] = {};

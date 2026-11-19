@@ -47,7 +47,8 @@ into `build/vulkan-shaders`.
   `Math`, `Input`, `Terrain`, `City`).
 - `src/Device/` — Vulkan/render management: instance/device/queue, swapchain,
   frame acquire/submit/present, command pools, pipelines, readback, platform
-  windows (`Platform/Win32|SDL3|Glfw`) and `SceneManager` targets.
+  windows (`Platform/Win32|SDL3|Glfw`), `SceneManager` targets and the
+  experimental `Threading` worker pool.
 - `src/Graphics/` — graphics domain: `GlobalDrawer` (Quality, Smooth, Meshes,
   LOD, Shadows, Hdr, Text, Rectangulars, Materials, Support) and
   `TextureManager` (textures, samplers, handles).

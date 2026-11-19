@@ -1,6 +1,14 @@
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include "MemoryManager.hpp"
 
+#include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace Aporia::graphics_internal {
 
@@ -30,8 +38,10 @@ bool MemoryManager::uploadBuffer(
         VkDeviceMemory& memory) noexcept {
     buffer = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
+
     if (size == 0 || data == nullptr || context.device == VK_NULL_HANDLE ||
         context.commandBuffer == VK_NULL_HANDLE) {
+
         return false;
     }
 
@@ -40,6 +50,8 @@ bool MemoryManager::uploadBuffer(
     const auto destroyStaging = [&]() noexcept {
         if (stagingBuffer != VK_NULL_HANDLE) vkDestroyBuffer(context.device, stagingBuffer, nullptr);
         if (stagingMemory != VK_NULL_HANDLE) vkFreeMemory(context.device, stagingMemory, nullptr);
+        stagingBuffer = VK_NULL_HANDLE;
+        stagingMemory = VK_NULL_HANDLE;
     };
 
     VkBufferCreateInfo stagingInfo{};
@@ -106,15 +118,12 @@ bool MemoryManager::uploadBuffer(
         return false;
     }
 
-    if (vkQueueWaitIdle(context.queue) != VK_SUCCESS ||
-        vkResetCommandBuffer(context.commandBuffer, 0) != VK_SUCCESS) {
-        destroyStaging();
-        return false;
-    }
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(context.commandBuffer, &beginInfo) != VK_SUCCESS) {
+    const VkResult beginResult = vkBeginCommandBuffer(context.commandBuffer, &beginInfo);
+    if (beginResult != VK_SUCCESS) {
+
         destroyStaging();
         return false;
     }
@@ -139,6 +148,7 @@ bool MemoryManager::uploadBuffer(
                          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1, &uploadBarrier, 0, nullptr);
 
     if (vkEndCommandBuffer(context.commandBuffer) != VK_SUCCESS) {
+
         destroyStaging();
         return false;
     }
@@ -147,10 +157,29 @@ bool MemoryManager::uploadBuffer(
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &context.commandBuffer;
-    const VkResult submitResult = vkQueueSubmit(context.queue, 1, &submitInfo, VK_NULL_HANDLE);
-    const VkResult waitResult = submitResult == VK_SUCCESS ? vkQueueWaitIdle(context.queue) : submitResult;
+
+    // Use a fence so the caller can wait asynchronously — no vkQueueWaitIdle
+    // needed. This avoids a full GPU pipeline stall on every buffer upload.
+    VkFence uploadFence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    const VkResult fenceResult = vkCreateFence(context.device, &fenceInfo, nullptr, &uploadFence);
+    const VkResult submitResult = fenceResult == VK_SUCCESS
+        ? vkQueueSubmit(context.queue, 1, &submitInfo, uploadFence)
+        : vkQueueSubmit(context.queue, 1, &submitInfo, VK_NULL_HANDLE);
+
+    // Wait on the fence if we created one; fall back to queue wait idle as a
+    // last resort when fence creation failed.
+    if (fenceResult == VK_SUCCESS) {
+        vkWaitForFences(context.device, 1, &uploadFence, VK_TRUE,
+                        std::numeric_limits<std::uint64_t>::max());
+        vkDestroyFence(context.device, uploadFence, nullptr);
+    } else if (submitResult == VK_SUCCESS) {
+        vkQueueWaitIdle(context.queue);
+    }
+
     destroyStaging();
-    return submitResult == VK_SUCCESS && waitResult == VK_SUCCESS;
+    return submitResult == VK_SUCCESS;
 }
 
 void MemoryManager::destroyBuffer(VkDevice device, VkBuffer& buffer, VkDeviceMemory& memory) noexcept {

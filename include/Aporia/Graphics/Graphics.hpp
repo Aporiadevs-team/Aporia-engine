@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Aporia/Core/Export.hpp"
+#include "Aporia/Graphics/Weather.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -158,7 +159,30 @@ struct CameraState {
 struct EnvironmentState {
     float sunDirection[3] = {0.35f, -0.5f, 0.8f}; // points toward the light
     float sunIntensity = 1.0f;
+    float ambient = 0.32f; // sky ambient floor (lower for night scenes)
     float mirrorZ = 0.0f; // planar reflection plane height (m); mirrors reflect across z=mirrorZ
+};
+
+enum class LightType : std::uint8_t {
+    Directional = 0,
+    Point = 1,
+    Spot = 2,
+};
+
+// One light source submitted per frame next to the camera/environment. The sun
+// stays in EnvironmentState (it owns the shadow map); these are the dynamic
+// lights: `radius` is the soft falloff distance and `softness` the falloff
+// exponent (higher = tighter core, softer edge).
+struct LightDesc {
+    LightType type = LightType::Point;
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float direction[3] = {0.0f, 0.0f, -1.0f}; // toward the light (directional/spot)
+    float color[3] = {1.0f, 1.0f, 1.0f};
+    float intensity = 1.0f;
+    float radius = 12.0f;
+    float softness = 2.0f;
+    float innerAngle = 0.5f; // spot cone, radians
+    float outerAngle = 0.7f; // spot cone, radians
 };
 
 // One drawable object for a frame.
@@ -166,6 +190,17 @@ struct RenderItem {
     std::uint64_t meshId = 0;
     float modelMatrix[16] = {};
     float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Emissive self-illumination (0 = no glow, >0 = bright self-luminous).
+    // Multiplied by color to allow warm white, neon blue, etc. The value is
+    // a linear multiplier: 1.0 means "emit full color brightness", 0.5 is
+    // half-brightness, 3.0 is overdriven (useful for bloom highlights).
+    // Emissive pixels pass through the bloom bright-pass in tonemap.frag.
+    float emissive = 0.0f;
+    // Per-item albedo texture. Invalid = the frame-wide texture chosen by
+    // Graphics::setTexture2D (the historical behavior, e.g. a shared imagery
+    // atlas). A valid handle samples that texture for this item only, so a
+    // scene can mix an atlas with individually textured models in one pass.
+    TextureHandle texture{};
 #if defined(APORIA_EXPERIMENTAL)
     MaterialHandle material{}; // multi-layer material (see createMaterial)
 #endif
@@ -174,6 +209,12 @@ struct RenderItem {
     // alpha comes from the material's base layer, so it composites over the
     // already-drawn opaque geometry.
     bool transparent = false;
+    // World-space bounds for engine-side frustum culling, applied per item in
+    // the mesh, shadow and reflection passes (modelMatrix is taken into
+    // account). Default is an inverted box = unbounded: the item is always
+    // drawn, preserving pre-culling behavior.
+    float aabbMin[3] = {0.0f, 0.0f, 0.0f};
+    float aabbMax[3] = {-1.0f, -1.0f, -1.0f};
 };
 
 enum class ShadowFilter : std::uint8_t {
@@ -222,11 +263,31 @@ enum class AntiAliasingMode : std::uint8_t {
     TAA = 2,
 };
 
+// Experimental UI compositing order (the 2D "z-buffer"). Every UI element is
+// tagged with a layer; the engine flattens rectangles and text into one ordered
+// stream and draws it low-to-high, interleaving the rect and text pipelines by
+// layer instead of always drawing all rects then all text.
+//   BeforeWorld - behind the 3D world (background panels)
+//   World       - at the world level
+//   Hud         - the scene HUD (default; preserves the old behaviour)
+//   Gui         - popups above the HUD but below the top overlay
+//   Overlay     - always on top (menus, tooltips, modal dialogs)
+enum class UiLayer : std::uint8_t {
+    BeforeWorld = 0,
+    World = 1,
+    Hud = 2,
+    Gui = 3,
+    Overlay = 4,
+};
+
+inline constexpr std::uint32_t kUiLayerCount = 5;
+
 struct UiRect {
     float x = 0.0f;
     float y = 0.0f;
     float width = 0.0f;
     float height = 0.0f;
+    UiLayer layer = UiLayer::Hud;
 };
 
 struct UiColor {
@@ -247,6 +308,10 @@ struct BlurConfig {
     std::uint32_t iterations = 2;
     float radius = 4.0f;
     float intensity = 1.0f;
+    // Experimental: the glass samples an already display-space composite (the
+    // layered backdrop) instead of the linear HDR scene, so the blur is not
+    // tonemapped a second time.
+    bool displaySpaceSource = false;
 };
 
 enum class UiTextAtlasMode : std::uint8_t {
@@ -285,6 +350,7 @@ struct UiTextRun {
     UiColor color{};
     float outlineWidth = 0.0f;
     UiColor outlineColor{};
+    UiLayer layer = UiLayer::Hud;
 };
 
 struct UiDrawList {
@@ -294,6 +360,12 @@ struct UiDrawList {
     FontHandle font{};
     float cornerRadius = 0.0f;
     BlurConfig blur{};
+    // Experimental: when true the engine composits the scene plus every UI layer
+    // below the topmost one, blurs that backdrop, and draws the topmost layer
+    // (sharp) over the blurred composite. This is the "modal overlay blurs the
+    // layers below it" mode; the top layer's own glass rects are drawn plain
+    // because the backdrop is already blurred.
+    bool backdropBlur = false;
 };
 
 struct GraphicsConfig {
@@ -310,9 +382,16 @@ struct GraphicsConfig {
     float mirrorZ = 0.0f;                         // planar reflection plane height (m)
     ShadowConfig shadows{};
     bool playerUltraShadows = false;
+    // Planar reflection pass (a second full-scene draw into the mirror target).
+    // The world shader does not sample that target yet, so hosts can switch the
+    // extra pass off without any visual change while mirror materials are absent.
+    bool reflections = true;
     AntiAliasingMode antiAliasing = AntiAliasingMode::SMAA;
     float antiAliasingStrength = 0.75f; // 0 = off, 1 = full blend
     BlurConfig blur{};
+    // Procedural sky background. Off by default: the host draws its own backdrop
+    // unless it opts in.
+    bool sky = false;
 };
 
 struct GraphicsStats {
@@ -400,6 +479,49 @@ public:
     void setUiDrawList(UiDrawList drawList);
     void clearUiDrawList() noexcept;
 
+    // Dynamic lights for the next frames. The active quality preset caps how
+    // many actually reach the shader (Low: 0, Medium: 8, High: 16).
+    void setLights(const std::vector<LightDesc>& lights);
+    void clearLights() noexcept;
+    [[nodiscard]] std::size_t lightCount() const noexcept;
+
+    // Weather for the next frames: precipitation, wind and fog. A
+    // default-constructed WeatherState is clear, so nothing changes until the
+    // host submits weather. Without APORIA_SEASONS the state is stored but not
+    // rendered.
+    void setWeather(const WeatherState& weather) noexcept;
+    [[nodiscard]] WeatherState weather() const noexcept;
+
+#if defined(APORIA_SEASONS)
+    // Applies the season's atmosphere preset (sky tint, sun/ambient scaling, fog
+    // and precipitation defaults). Call setWeather() afterwards to override the
+    // weather fields with live data.
+    void setSeason(Season season) noexcept;
+    [[nodiscard]] Season season() const noexcept;
+#endif
+
+    // Time-of-day clock (0..24h). Drives sunsets once the sky consumes it.
+    void setTimeOfDay(double hours) noexcept;
+    [[nodiscard]] double timeOfDay() const noexcept;
+    // Take the local OS clock, second-accurate (Windows); or real UTC + offset.
+    void syncTimeWithComputer() noexcept;
+    void syncTimeWithHours(int utcOffsetHours, int minutes = 0, int seconds = 0) noexcept;
+    // Reality -> game clock: a full day lasts `realMinutesPerDay` real minutes,
+    // `speed`x faster. Default 1440 / 1 = real time.
+    void setGameClock(float realMinutesPerDay, float speed = 1.0f) noexcept;
+    [[nodiscard]] float gameClockScale() const noexcept;
+    // When on, the sun (sky + lighting + shadows) follows the time-of-day clock,
+    // giving real sunrises/sunsets. Off by default (sun comes from EnvironmentState).
+    void setTimeDrivenSun(bool enabled) noexcept;
+    [[nodiscard]] bool timeDrivenSun() const noexcept;
+    // Calendar date; the season drives sunrise/sunset when the sun is time-driven.
+    void setDate(int month, int day) noexcept;
+    [[nodiscard]] double sunriseHour() const noexcept;
+    [[nodiscard]] double sunsetHour() const noexcept;
+    // Manual day-length trim in hours (negative shortens the day).
+    void setDayLengthBias(double hours) noexcept;
+    [[nodiscard]] double dayLengthBias() const noexcept;
+
     // Copies the last rendered headless color target into host memory (RGBA8,
     // renderWidth * renderHeight * 4 bytes). Native targets are not readable.
     [[nodiscard]] bool readbackPixels(std::vector<std::uint8_t>& pixels) const;
@@ -418,6 +540,11 @@ public:
     bool updateMaterial(MaterialHandle handle, const MaterialDesc& description);
     void destroyMaterial(MaterialHandle handle) noexcept;
     [[nodiscard]] bool materialValid(MaterialHandle handle) const noexcept;
+
+    // EXPERIMENTAL renderer threading. When enabled the shadow pass is recorded
+    // on a worker thread in parallel with the main frame recording. Default on.
+    void setMultithreadedRender(bool enabled) noexcept;
+    [[nodiscard]] bool multithreadedRender() const noexcept;
 #endif
 
     MeshHandle createMesh(const MeshData& data);
@@ -445,6 +572,9 @@ public:
     FontHandle createFontFromMsdf(const std::string& jsonPath, const std::string& pngPath);
     void destroyFont(FontHandle handle) noexcept;
     [[nodiscard]] bool fontValid(FontHandle handle) const noexcept;
+    // Width in pixels of `text` laid out at `size` with the given font (0 if
+    // the font is unknown). Useful for centering UI text inside a rectangle.
+    [[nodiscard]] float measureText(FontHandle handle, std::string_view text, float size) const;
 
     [[nodiscard]] GraphicsStats stats() const noexcept;
     [[nodiscard]] const std::string& lastError() const noexcept;

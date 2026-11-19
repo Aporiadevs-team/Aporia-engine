@@ -55,6 +55,22 @@ struct SwapchainContext {
     std::string* error = nullptr;
 };
 
+// Picks a surface format the device can render to and a present mode matching
+// the vsync request. Used by configureSurface(); exposed for callers that only
+// need the choice.
+bool chooseSurfaceFormat(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    VkSurfaceFormatKHR& selectedFormat);
+VkPresentModeKHR choosePresentMode(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    bool vsync);
+
+// Client-area size of a native window (HWND on Win32). False when the window is
+// minimized or the platform has no window handles.
+bool clientAreaExtent(void* nativeWindow, VkExtent2D& extent) noexcept;
+
 // Validates queue support and picks the color format / present mode.
 bool configureSurface(const SwapchainContext& context);
 // Creates the swapchain, image views, depth images and framebuffers. Updates

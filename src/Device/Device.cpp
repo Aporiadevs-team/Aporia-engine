@@ -233,6 +233,18 @@ bool Device::createCommandBuffer(
     return vkAllocateCommandBuffers(device, &info, &outBuffer) == VK_SUCCESS;
 }
 
+bool Device::createSecondaryCommandBuffer(
+        VkDevice device,
+        VkCommandPool pool,
+        VkCommandBuffer& outBuffer) noexcept {
+    VkCommandBufferAllocateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    info.commandPool = pool;
+    info.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+    info.commandBufferCount = 1;
+    return vkAllocateCommandBuffers(device, &info, &outBuffer) == VK_SUCCESS;
+}
+
 bool Device::createFrameSync(VkDevice device, FrameSync& sync) noexcept {
     VkSemaphoreCreateInfo semaphoreInfo{};
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;

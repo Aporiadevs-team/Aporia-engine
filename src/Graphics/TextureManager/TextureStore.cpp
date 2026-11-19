@@ -9,8 +9,9 @@
 
 #include "TextureStore.hpp"
 
-#include "Graphics/GlobalDrawer/Support/Support.hpp"
+#include "Graphics/Support/Support.hpp"
 
+#include <cstdio>
 #include <limits>
 #include <utility>
 
@@ -33,6 +34,7 @@ TextureManager::CreateContext makeCreateContext(const TextureStore::Device& devi
 bool TextureStore::uploadData(Resource& texture, const void* pixels, std::size_t dataSize, VkImageLayout oldLayout, std::string& error) {
     TextureManager::UploadContext context;
     context.device = device_.device;
+    context.physicalDevice = device_.physicalDevice;
     context.memoryProperties = device_.memoryProperties;
     context.commandBuffer = device_.commandBuffer;
     context.queue = device_.queue;
@@ -101,10 +103,13 @@ bool TextureStore::createDescriptorResources(std::string& error) {
 
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 1;
+    poolSize.descriptorCount = kMaxDescriptorSets;
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
+    // Per-texture sets are handed out lazily and freed when their texture is
+    // destroyed, so the pool must allow individual frees.
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = kMaxDescriptorSets;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
     if (vkCreateDescriptorPool(device_.device, &poolInfo, nullptr, &descriptorPool_) != VK_SUCCESS) {
@@ -140,6 +145,48 @@ bool TextureStore::createDescriptorResources(std::string& error) {
     write.pImageInfo = &imageInfo;
     vkUpdateDescriptorSets(device_.device, 1, &write, 0, nullptr);
     return true;
+}
+
+VkDescriptorSet TextureStore::setFor(TextureHandle handle) {
+    if (descriptorPool_ == VK_NULL_HANDLE || !handle.valid()) {
+        return VK_NULL_HANDLE;
+    }
+    const auto existing = descriptorSets_.find(handle.value());
+    if (existing != descriptorSets_.end()) {
+        return existing->second;
+    }
+    const auto textureIt = textures_.find(handle.value());
+    if (textureIt == textures_.end()) {
+        return VK_NULL_HANDLE;
+    }
+    if (descriptorSets_.size() + 1 >= kMaxDescriptorSets) {
+        return VK_NULL_HANDLE;
+    }
+
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = descriptorPool_;
+    allocateInfo.descriptorSetCount = 1;
+    allocateInfo.pSetLayouts = &descriptorSetLayout_;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device_.device, &allocateInfo, &set) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler = textureIt->second.sampler;
+    imageInfo.imageView = textureIt->second.view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device_.device, 1, &write, 0, nullptr);
+    descriptorSets_.emplace(handle.value(), set);
+    return set;
 }
 
 void TextureStore::destroyDescriptorResources(VkDevice device) noexcept {
@@ -180,7 +227,7 @@ bool TextureStore::initialize(SceneBindings& scene, std::string& error) {
     return createDescriptorResources(error);
 }
 
-bool TextureStore::bind(TextureHandle handle, SceneBindings& scene, std::string& error) {
+bool TextureStore::bind(TextureHandle handle, SceneBindings& scene, std::uint32_t frameSlot, std::string& error) {
     if (descriptorSet_ == VK_NULL_HANDLE || !handle.valid()) {
         error = "Texture descriptor is not available";
         return false;
@@ -204,11 +251,42 @@ bool TextureStore::bind(TextureHandle handle, SceneBindings& scene, std::string&
     write.pImageInfo = &imageInfo;
     vkUpdateDescriptorSets(device_.device, 1, &write, 0, nullptr);
     boundTexture_ = handle;
-    scene.bindAlbedo(textureIt->second.view, textureIt->second.sampler);
+    scene.bindAlbedo(frameSlot, textureIt->second.view, textureIt->second.sampler);
+    return true;
+}
+
+bool TextureStore::bindAll(TextureHandle handle, SceneBindings& scene, std::string& error) {
+    if (descriptorSet_ == VK_NULL_HANDLE || !handle.valid()) {
+        error = "Texture descriptor is not available";
+        return false;
+    }
+    const auto textureIt = textures_.find(handle.value());
+    if (textureIt == textures_.end()) {
+        error = "Texture handle is invalid";
+        return false;
+    }
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler = textureIt->second.sampler;
+    imageInfo.imageView = textureIt->second.view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = descriptorSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device_.device, 1, &write, 0, nullptr);
+    boundTexture_ = handle;
+    for (std::uint32_t slot = 0; slot < SceneBindings::kSlots; ++slot) {
+        scene.bindAlbedo(slot, textureIt->second.view, textureIt->second.sampler);
+    }
     return true;
 }
 
 TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings& scene, std::string& error) {
+    
     if (nextTextureId_ == 0) {
         error = "Texture handle space is exhausted";
         return invalidTextureHandle;
@@ -216,8 +294,10 @@ TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings
 
     Resource texture;
     if (!createResource(description, texture, error)) {
+        
         return invalidTextureHandle;
     }
+    
 
     const std::uint64_t id = nextTextureId_++;
     if (textures_.find(id) != textures_.end()) {
@@ -245,7 +325,11 @@ TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings
     }
 
     const TextureHandle handle{id};
-    if (!bind(handle, scene, error)) {
+    // Creating a per-item texture must not hijack the frame-wide albedo. The
+    // old code bound the new texture to the current ring slot only, which left
+    // the other slots sampling the previous texture; hosts had to rebind for
+    // several frames to heal it. Keep the bound texture on every slot instead.
+    if (boundTexture_.valid() && !bindAll(boundTexture_, scene, error)) {
         const auto textureIt = textures_.find(id);
         if (textureIt != textures_.end()) {
             TextureManager::destroyResource(device_.device, textureIt->second);
@@ -282,6 +366,9 @@ void TextureStore::destroy(TextureHandle handle, SceneBindings& scene, std::stri
         error = "Texture handle is invalid";
         return;
     }
+    // Destroy requires that no in-flight GPU command references the texture.
+    // vkDeviceWaitIdle is necessary here — we have no access to the per-frame
+    // fence from TextureStore, and destroying a live resource would be UB.
     if (device_.device == VK_NULL_HANDLE || vkDeviceWaitIdle(device_.device) != VK_SUCCESS) {
         error = "vkDeviceWaitIdle(texture destroy) failed";
         return;
@@ -290,14 +377,26 @@ void TextureStore::destroy(TextureHandle handle, SceneBindings& scene, std::stri
         error = "Default texture is unavailable";
         return;
     }
-    if (boundTexture_ == handle && !bind(defaultTexture_, scene, error)) {
+    if (boundTexture_ == handle && !bindAll(defaultTexture_, scene, error)) {
         return;
     }
     TextureManager::destroyResource(device_.device, textureIt->second);
     textures_.erase(textureIt);
+    const auto setIt = descriptorSets_.find(handle.value());
+    if (setIt != descriptorSets_.end()) {
+        if (descriptorPool_ != VK_NULL_HANDLE) {
+            vkFreeDescriptorSets(device_.device, descriptorPool_, 1, &setIt->second);
+        }
+        descriptorSets_.erase(setIt);
+    }
     const auto boundIt = textures_.find(boundTexture_.value());
     if (boundIt != textures_.end()) {
-        scene.bindAlbedo(boundIt->second.view, boundIt->second.sampler);
+        // vkDeviceWaitIdle above makes every ring slot safe to rewrite. All of
+        // them have to move: writing only the current slot leaves the other one
+        // sampling the view that was just destroyed.
+        for (std::uint32_t slot = 0; slot < SceneBindings::kSlots; ++slot) {
+            scene.bindAlbedo(slot, boundIt->second.view, boundIt->second.sampler);
+        }
     }
 }
 
@@ -306,6 +405,7 @@ void TextureStore::release(VkDevice device) noexcept {
         TextureManager::destroyResource(device, entry.second);
     }
     textures_.clear();
+    descriptorSets_.clear(); // pool destruction frees the sets
     defaultTexture_ = invalidTextureHandle;
     boundTexture_ = invalidTextureHandle;
     nextTextureId_ = 1;

@@ -162,6 +162,17 @@ public:
     void setTimestepHz(double hz) noexcept;
     [[nodiscard]] double timestepHz() const noexcept;
 
+    // Destroy a dynamic body created by createSphere/createBox/createCapsule.
+    // Heightfield bodies (created via createHeightfield) cannot be destroyed.
+    void destroyBody(BodyHandle body) noexcept;
+
+    // Body sleeping: bodies with velocity below the threshold for several
+    // substeps stop participating in the solver and broad-phase, saving CPU.
+    // `wakeBody()` forces a sleeping body back to sleep.
+    void setSleepThreshold(double velocityMps) noexcept;
+    [[nodiscard]] double sleepThreshold() const noexcept;
+    void wakeBody(BodyHandle body) noexcept;
+
     [[nodiscard]] std::size_t lastStepCollisionCount() const noexcept;
     [[nodiscard]] ContactInfo lastContact() const noexcept;
     [[nodiscard]] std::vector<ContactInfo> lastContacts() const;
