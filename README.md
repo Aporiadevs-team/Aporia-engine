@@ -5,6 +5,24 @@ fixed-timestep physics core. The engine builds as a single shared library
 (`AporiaEngine.dll`) with a public API under `include/Aporia`; host applications
 link against the `Aporia::Engine` target.
 
+## Quick start
+
+Grab `create_project.bat` from the latest release, drop it anywhere and run:
+
+```bat
+create_project.bat my_game
+```
+
+It clones the released engine into `my_game\engine` and writes a base
+`CMakeLists.txt` plus `src\main.cpp` that already links `Aporia::Engine`.
+Then:
+
+```sh
+cd my_game
+cmake -S . -B build -DAPORIA_ENABLE_GRAPHICS=ON -DAPORIA_ENABLE_VULKAN=ON
+cmake --build build --config Release
+```
+
 ## Requirements
 
 - Windows 10/11, x64
