@@ -170,6 +170,10 @@ struct RenderItem {
     MaterialHandle material{}; // multi-layer material (see createMaterial)
 #endif
     bool playerShadowCaster = false;
+    // Alpha-blended with depth writes disabled (glass, decals): the fragment
+    // alpha comes from the material's base layer, so it composites over the
+    // already-drawn opaque geometry.
+    bool transparent = false;
 };
 
 enum class ShadowFilter : std::uint8_t {

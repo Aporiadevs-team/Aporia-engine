@@ -10,6 +10,7 @@
 #include "QualityTargets.hpp"
 
 #include "Device/Init/RenderPass.hpp"
+#include "Device/MemoryManager/MemoryManager.hpp"
 #include "Device/SceneManager/Color/ColorTarget.hpp"
 #include "Device/SceneManager/Depth/DepthTarget.hpp"
 #include "Graphics/GlobalDrawer/Support/Support.hpp"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace Aporia::graphics_internal {
 
@@ -232,10 +234,59 @@ bool QualityTargets::rebuild(const RebuildContext& rebuildContext, std::string& 
             error = "vkAllocateDescriptorSets(tonemap) failed";
             return false;
         }
+        // Volumetric resources: a nearest depth sampler and a host-visible UBO
+        // holding the ray-march parameters.
+        if (tonemapDepthSampler == VK_NULL_HANDLE) {
+            VkSamplerCreateInfo depthInfo{};
+            depthInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            depthInfo.magFilter = VK_FILTER_NEAREST;
+            depthInfo.minFilter = VK_FILTER_NEAREST;
+            depthInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            depthInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            depthInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            depthInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            depthInfo.maxLod = 0.0f;
+            if (vkCreateSampler(gpu.device, &depthInfo, nullptr, &tonemapDepthSampler) != VK_SUCCESS) {
+                error = "vkCreateSampler(tonemap depth) failed";
+                return false;
+            }
+        }
+        if (tonemapVolumetricBuffer == VK_NULL_HANDLE) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = sizeof(VolumetricUniforms);
+            bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (vkCreateBuffer(gpu.device, &bufferInfo, nullptr, &tonemapVolumetricBuffer) != VK_SUCCESS) {
+                error = "vkCreateBuffer(volumetric) failed";
+                return false;
+            }
+            VkMemoryRequirements requirements{};
+            vkGetBufferMemoryRequirements(gpu.device, tonemapVolumetricBuffer, &requirements);
+            std::uint32_t memoryType = 0;
+            if (!MemoryManager::findMemoryType(gpu.memoryProperties, requirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, memoryType)) {
+                error = "No host-visible memory for the volumetric buffer";
+                return false;
+            }
+            VkMemoryAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocateInfo.allocationSize = requirements.size;
+            allocateInfo.memoryTypeIndex = memoryType;
+            if (vkAllocateMemory(gpu.device, &allocateInfo, nullptr, &tonemapVolumetricMemory) != VK_SUCCESS ||
+                vkBindBufferMemory(gpu.device, tonemapVolumetricBuffer, tonemapVolumetricMemory, 0) != VK_SUCCESS) {
+                error = "vkAllocateMemory(volumetric) failed";
+                return false;
+            }
+        }
+
         VkDescriptorImageInfo hdrDescriptor{};
         hdrDescriptor.sampler = hdrSampler;
         hdrDescriptor.imageView = hdrView;
         hdrDescriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // The tonemap layout declares only binding 0 (HDR color). Writing the
+        // depth/shadow/volumetric bindings here referenced slots the layout does
+        // not have and produced validation errors.
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet = tonemapDescriptorSet;
@@ -383,6 +434,15 @@ void QualityTargets::destroyTargets(VkDevice device, VkDescriptorPool tonemapPoo
         if (reflectSampler != VK_NULL_HANDLE) {
             vkDestroySampler(device, reflectSampler, nullptr);
         }
+        if (tonemapVolumetricBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, tonemapVolumetricBuffer, nullptr);
+        }
+        if (tonemapVolumetricMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, tonemapVolumetricMemory, nullptr);
+        }
+        if (tonemapDepthSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, tonemapDepthSampler, nullptr);
+        }
         scene.releaseResources(device);
         if (tonemapPool != VK_NULL_HANDLE) {
             // Pool is owned by initialize/destroy; rebuild only reclaims
@@ -413,6 +473,23 @@ void QualityTargets::destroyTargets(VkDevice device, VkDescriptorPool tonemapPoo
     reflectSampler = VK_NULL_HANDLE;
     reflectRenderPass = VK_NULL_HANDLE;
     tonemapDescriptorSet = VK_NULL_HANDLE;
+    tonemapVolumetricBuffer = VK_NULL_HANDLE;
+    tonemapVolumetricMemory = VK_NULL_HANDLE;
+    tonemapDepthSampler = VK_NULL_HANDLE;
+}
+
+bool QualityTargets::writeTonemapVolumetric(const VolumetricUniforms& uniforms) noexcept {
+    if (tonemapVolumetricMemory == VK_NULL_HANDLE || gpu.device == VK_NULL_HANDLE) {
+        return false;
+    }
+    void* mapped = nullptr;
+    if (vkMapMemory(gpu.device, tonemapVolumetricMemory, 0, sizeof(VolumetricUniforms), 0, &mapped) != VK_SUCCESS ||
+        mapped == nullptr) {
+        return false;
+    }
+    std::memcpy(mapped, &uniforms, sizeof(uniforms));
+    vkUnmapMemory(gpu.device, tonemapVolumetricMemory);
+    return true;
 }
 
 } // namespace Aporia::graphics_internal

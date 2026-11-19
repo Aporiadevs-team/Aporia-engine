@@ -47,6 +47,178 @@ bool loadShaderModule(VkDevice device, const std::string& path, const char* labe
 
 } // namespace
 
+bool createMeshPipelines(const MeshPipelineContext& context, PipelineSet& out, std::string& error) {
+    const VkDevice device = context.device;
+    if (device == VK_NULL_HANDLE || context.layout == VK_NULL_HANDLE ||
+        context.vertexShader == VK_NULL_HANDLE || context.fragmentShader == VK_NULL_HANDLE ||
+        context.renderPass == VK_NULL_HANDLE) {
+        error = "Mesh pipeline context is incomplete";
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo meshStages[2]{};
+    meshStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    meshStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    meshStages[0].module = context.vertexShader;
+    meshStages[0].pName = "main";
+    meshStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    meshStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    meshStages[1].module = context.fragmentShader;
+    meshStages[1].pName = "main";
+
+    VkVertexInputBindingDescription vertexBinding{};
+    vertexBinding.binding = 0;
+    vertexBinding.stride = static_cast<std::uint32_t>(sizeof(MeshVertex));
+    vertexBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    std::array<VkVertexInputAttributeDescription, 3> vertexAttributes{};
+    vertexAttributes[0].binding = 0;
+    vertexAttributes[0].location = 0;
+    vertexAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    vertexAttributes[0].offset = offsetof(MeshVertex, position);
+    vertexAttributes[1].binding = 0;
+    vertexAttributes[1].location = 1;
+    vertexAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    vertexAttributes[1].offset = offsetof(MeshVertex, normal);
+    vertexAttributes[2].binding = 0;
+    vertexAttributes[2].location = 2;
+    vertexAttributes[2].format = VK_FORMAT_R32G32_SFLOAT;
+    vertexAttributes[2].offset = offsetof(MeshVertex, uv);
+
+    VkPipelineVertexInputStateCreateInfo meshVertexInput{};
+    meshVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    meshVertexInput.vertexBindingDescriptionCount = 1;
+    meshVertexInput.pVertexBindingDescriptions = &vertexBinding;
+    meshVertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(vertexAttributes.size());
+    meshVertexInput.pVertexAttributeDescriptions = vertexAttributes.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterization.cullMode = VK_CULL_MODE_NONE;
+    rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterization.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState colorAttachment{};
+    colorAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo colorBlend{};
+    colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlend.attachmentCount = 1;
+    colorBlend.pAttachments = &colorAttachment;
+
+    const VkDynamicState dynamicStates[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.minDepthBounds = 0.0f;
+    depthStencil.maxDepthBounds = 1.0f;
+
+    VkGraphicsPipelineCreateInfo meshPipelineInfo{};
+    meshPipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    meshPipelineInfo.stageCount = 2;
+    meshPipelineInfo.pStages = meshStages;
+    meshPipelineInfo.pVertexInputState = &meshVertexInput;
+    meshPipelineInfo.pInputAssemblyState = &inputAssembly;
+    meshPipelineInfo.pViewportState = &viewportState;
+    meshPipelineInfo.pRasterizationState = &rasterization;
+    meshPipelineInfo.pMultisampleState = &multisample;
+    meshPipelineInfo.pDepthStencilState = &depthStencil;
+    meshPipelineInfo.pColorBlendState = &colorBlend;
+    meshPipelineInfo.pDynamicState = &dynamicState;
+    meshPipelineInfo.layout = context.layout;
+    meshPipelineInfo.renderPass = context.renderPass;
+    meshPipelineInfo.subpass = 0;
+
+    // Quality specialization: PCF tap count and reflection toggle compile per
+    // preset, so Low pays neither cost.
+    VkSpecializationMapEntry specEntries[2]{};
+    specEntries[0].constantID = 0;
+    specEntries[0].offset = 0;
+    specEntries[0].size = sizeof(std::int32_t);
+    specEntries[1].constantID = 1;
+    specEntries[1].offset = sizeof(std::int32_t);
+    specEntries[1].size = sizeof(float);
+    float specReflection = context.reflectionsEnabled ? 1.0f : 0.0f;
+    std::int32_t specTaps = context.shadowTaps;
+    std::int32_t specData[2] = {specTaps, 0};
+    std::memcpy(specData + 1, &specReflection, sizeof(float));
+    VkSpecializationInfo meshSpecInfo{};
+    meshSpecInfo.mapEntryCount = 2;
+    meshSpecInfo.pMapEntries = specEntries;
+    meshSpecInfo.dataSize = sizeof(specData);
+    meshSpecInfo.pData = specData;
+    meshStages[1].pSpecializationInfo = &meshSpecInfo;
+
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.meshPipeline) != VK_SUCCESS) {
+        error = "vkCreateGraphicsPipelines(mesh) failed";
+        return false;
+    }
+    if (context.hdrRenderPass != VK_NULL_HANDLE) {
+        meshPipelineInfo.renderPass = context.hdrRenderPass;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.hdrMeshPipeline) != VK_SUCCESS) {
+            error = "vkCreateGraphicsPipelines(hdr mesh) failed";
+            return false;
+        }
+    }
+
+    // Transparent mesh variants: same shaders/layout, but alpha-blended with
+    // depth writes off so glass sorts over the body without punching holes.
+    VkPipelineColorBlendAttachmentState transparentAttachment = colorAttachment;
+    transparentAttachment.blendEnable = VK_TRUE;
+    transparentAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    transparentAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    transparentAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    transparentAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    transparentAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    transparentAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    VkPipelineColorBlendStateCreateInfo transparentColorBlend = colorBlend;
+    transparentColorBlend.pAttachments = &transparentAttachment;
+
+    VkPipelineDepthStencilStateCreateInfo transparentDepthStencil = depthStencil;
+    transparentDepthStencil.depthWriteEnable = VK_FALSE;
+
+    meshPipelineInfo.pColorBlendState = &transparentColorBlend;
+    meshPipelineInfo.pDepthStencilState = &transparentDepthStencil;
+    meshPipelineInfo.renderPass = context.renderPass;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.meshTransparentPipeline) != VK_SUCCESS) {
+        error = "vkCreateGraphicsPipelines(transparent mesh) failed";
+        return false;
+    }
+    if (context.hdrRenderPass != VK_NULL_HANDLE) {
+        meshPipelineInfo.renderPass = context.hdrRenderPass;
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.hdrMeshTransparentPipeline) != VK_SUCCESS) {
+            error = "vkCreateGraphicsPipelines(hdr transparent mesh) failed";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool createPipelines(const PipelineContext& context, PipelineSet& out, std::string& error) {
     const VkDevice device = context.device;
     const std::string& shaderDirectory = context.shaderDirectory;
@@ -173,108 +345,17 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
         return false;
     }
 
-    VkPipelineShaderStageCreateInfo meshShaderStages[2]{};
-    meshShaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    meshShaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    meshShaderStages[0].module = out.meshVertexShader;
-    meshShaderStages[0].pName = "main";
-    meshShaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    meshShaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    meshShaderStages[1].module = out.meshFragmentShader;
-    meshShaderStages[1].pName = "main";
-
-    VkVertexInputBindingDescription vertexBinding{};
-    vertexBinding.binding = 0;
-    vertexBinding.stride = static_cast<std::uint32_t>(sizeof(MeshVertex));
-    vertexBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    std::array<VkVertexInputAttributeDescription, 3> vertexAttributes{};
-    vertexAttributes[0].binding = 0;
-    vertexAttributes[0].location = 0;
-    vertexAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    vertexAttributes[0].offset = offsetof(MeshVertex, position);
-    vertexAttributes[1].binding = 0;
-    vertexAttributes[1].location = 1;
-    vertexAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    vertexAttributes[1].offset = offsetof(MeshVertex, normal);
-    vertexAttributes[2].binding = 0;
-    vertexAttributes[2].location = 2;
-    vertexAttributes[2].format = VK_FORMAT_R32G32_SFLOAT;
-    vertexAttributes[2].offset = offsetof(MeshVertex, uv);
-
-    VkPipelineVertexInputStateCreateInfo meshVertexInput{};
-    meshVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    meshVertexInput.vertexBindingDescriptionCount = 1;
-    meshVertexInput.pVertexBindingDescriptions = &vertexBinding;
-    meshVertexInput.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(vertexAttributes.size());
-    meshVertexInput.pVertexAttributeDescriptions = vertexAttributes.data();
-
-    // The depth-only shader consumes only position; sharing the full mesh
-    // declaration triggered validation warnings for unused normal/UV inputs.
-    VkVertexInputAttributeDescription shadowVertexAttribute{};
-    shadowVertexAttribute.binding = 0;
-    shadowVertexAttribute.location = 0;
-    shadowVertexAttribute.format = VK_FORMAT_R32G32B32_SFLOAT;
-    shadowVertexAttribute.offset = offsetof(MeshVertex, position);
-    VkPipelineVertexInputStateCreateInfo shadowVertexInput{};
-    shadowVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    shadowVertexInput.vertexBindingDescriptionCount = 1;
-    shadowVertexInput.pVertexBindingDescriptions = &vertexBinding;
-    shadowVertexInput.vertexAttributeDescriptionCount = 1;
-    shadowVertexInput.pVertexAttributeDescriptions = &shadowVertexAttribute;
-
-    VkPipelineDepthStencilStateCreateInfo depthStencil{};
-    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-    depthStencil.minDepthBounds = 0.0f;
-    depthStencil.maxDepthBounds = 1.0f;
-
-    VkGraphicsPipelineCreateInfo meshPipelineInfo{};
-    meshPipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    meshPipelineInfo.stageCount = 2;
-    meshPipelineInfo.pStages = meshShaderStages;
-    meshPipelineInfo.pVertexInputState = &meshVertexInput;
-    meshPipelineInfo.pInputAssemblyState = &inputAssembly;
-    meshPipelineInfo.pViewportState = &viewportState;
-    meshPipelineInfo.pRasterizationState = &rasterization;
-    meshPipelineInfo.pMultisampleState = &multisample;
-    meshPipelineInfo.pDepthStencilState = &depthStencil;
-    meshPipelineInfo.pColorBlendState = &colorBlend;
-    meshPipelineInfo.pDynamicState = &dynamicState;
-    meshPipelineInfo.layout = out.meshPipelineLayout;
-    meshPipelineInfo.renderPass = context.renderPass;
-    meshPipelineInfo.subpass = 0;
-    // Quality specialization: PCF tap count and reflection toggle compile per
-    // preset, so Low pays neither cost.
-    VkSpecializationMapEntry specEntries[2]{};
-    specEntries[0].constantID = 0;
-    specEntries[0].offset = 0;
-    specEntries[0].size = sizeof(std::int32_t);
-    specEntries[1].constantID = 1;
-    specEntries[1].offset = sizeof(std::int32_t);
-    specEntries[1].size = sizeof(float);
-    float specReflection = context.reflectionsEnabled ? 1.0f : 0.0f;
-    std::int32_t specTaps = context.shadowTaps;
-    std::int32_t specData[2] = {specTaps, 0};
-    std::memcpy(specData + 1, &specReflection, sizeof(float));
-    VkSpecializationInfo meshSpecInfo{};
-    meshSpecInfo.mapEntryCount = 2;
-    meshSpecInfo.pMapEntries = specEntries;
-    meshSpecInfo.dataSize = sizeof(specData);
-    meshSpecInfo.pData = specData;
-    meshShaderStages[1].pSpecializationInfo = &meshSpecInfo;
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.meshPipeline) != VK_SUCCESS) {
-        error = "vkCreateGraphicsPipelines(mesh) failed";
+    MeshPipelineContext meshContext;
+    meshContext.device = device;
+    meshContext.layout = out.meshPipelineLayout;
+    meshContext.vertexShader = out.meshVertexShader;
+    meshContext.fragmentShader = out.meshFragmentShader;
+    meshContext.renderPass = context.renderPass;
+    meshContext.hdrRenderPass = context.hdrRenderPass;
+    meshContext.shadowTaps = context.shadowTaps;
+    meshContext.reflectionsEnabled = context.reflectionsEnabled;
+    if (!createMeshPipelines(meshContext, out, error)) {
         return false;
-    }
-    if (context.hdrRenderPass != VK_NULL_HANDLE) {
-        meshPipelineInfo.renderPass = context.hdrRenderPass;
-        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &meshPipelineInfo, nullptr, &out.hdrMeshPipeline) != VK_SUCCESS) {
-            error = "vkCreateGraphicsPipelines(hdr mesh) failed";
-            return false;
-        }
     }
 
     // Quality pipelines: shadow depth pass and HDR tonemap pass.
@@ -297,6 +378,24 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
         error = "vkCreatePipelineLayout(shadow) failed";
         return false;
     }
+
+    // The depth-only shader consumes only position; sharing the full mesh
+    // declaration triggered validation warnings for unused normal/UV inputs.
+    VkVertexInputBindingDescription vertexBinding{};
+    vertexBinding.binding = 0;
+    vertexBinding.stride = static_cast<std::uint32_t>(sizeof(MeshVertex));
+    vertexBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription shadowVertexAttribute{};
+    shadowVertexAttribute.binding = 0;
+    shadowVertexAttribute.location = 0;
+    shadowVertexAttribute.format = VK_FORMAT_R32G32B32_SFLOAT;
+    shadowVertexAttribute.offset = offsetof(MeshVertex, position);
+    VkPipelineVertexInputStateCreateInfo shadowVertexInput{};
+    shadowVertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    shadowVertexInput.vertexBindingDescriptionCount = 1;
+    shadowVertexInput.pVertexBindingDescriptions = &vertexBinding;
+    shadowVertexInput.vertexAttributeDescriptionCount = 1;
+    shadowVertexInput.pVertexAttributeDescriptions = &shadowVertexAttribute;
 
     VkPipelineShaderStageCreateInfo shadowStages[2]{};
     shadowStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -479,6 +578,8 @@ void destroyPipelines(VkDevice device, PipelineSet& p) noexcept {
     destroyLayout(p.pipelineLayout);
     destroyPipeline(p.meshPipeline);
     destroyPipeline(p.hdrMeshPipeline);
+    destroyPipeline(p.meshTransparentPipeline);
+    destroyPipeline(p.hdrMeshTransparentPipeline);
     destroyLayout(p.meshPipelineLayout);
     destroyModule(p.meshVertexShader);
     destroyModule(p.meshFragmentShader);

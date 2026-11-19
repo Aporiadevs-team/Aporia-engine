@@ -142,14 +142,18 @@ void main() {
     vec2 uv1 = fragUv * layerParams.uvScale.y + layerParams.uvOffset.y;
     vec2 uv2 = fragUv * layerParams.uvScale.z + layerParams.uvOffset.z;
     vec2 uv3 = fragUv * layerParams.uvScale.w + layerParams.uvOffset.w;
-    vec3 albedo = texture(layerDiffuse0, uv0).rgb;
+    vec4 base = texture(layerDiffuse0, uv0);
+    vec3 albedo = base.rgb;
+    float texAlpha = base.a;
     vec4 mask = texture(layerMask0, fragUv);
     albedo = mix(albedo, texture(layerDiffuse1, uv1).rgb, mask.r);
     albedo = mix(albedo, texture(layerDiffuse2, uv2).rgb, mask.g);
     albedo = mix(albedo, texture(layerDiffuse3, uv3).rgb, mask.b);
     albedo *= fragColor.rgb;
 #else
-    vec3 albedo = texture(albedoTexture, fragUv).rgb * fragColor.rgb;
+    vec4 albedoSample = texture(albedoTexture, fragUv);
+    vec3 albedo = albedoSample.rgb * fragColor.rgb;
+    float texAlpha = albedoSample.a;
 #endif
     float albedoLuminance = dot(albedo, vec3(0.299, 0.587, 0.114));
     albedo = mix(albedo, vec3(albedoLuminance), 0.18);
@@ -164,5 +168,5 @@ void main() {
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - fragWorldPosition);
     lit = planarReflection(lit, normal, viewDirection);
 
-    outColor = vec4(lit, fragColor.a); // linear HDR; tonemap pass converts to display
+    outColor = vec4(lit, fragColor.a * texAlpha); // linear HDR; tonemap pass converts to display
 }

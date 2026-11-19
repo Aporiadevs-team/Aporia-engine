@@ -390,10 +390,30 @@ bool Graphics::Impl::renderFrameCommands(VkFramebuffer targetFramebuffer, std::u
         }
 
         if (mainMeshPipeline != VK_NULL_HANDLE && !pendingItems.empty()) {
-            graphics_internal::MeshRenderer::renderMeshes(
-                commandBuffer, pipelines.meshPipeline, pipelines.meshPipelineLayout,
-                scene.set(uniformSlot), pendingViewProj,
-                pendingItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
+            std::vector<RenderItem> opaqueItems;
+            std::vector<RenderItem> transparentItems;
+            opaqueItems.reserve(pendingItems.size());
+            for (const RenderItem& item : pendingItems) {
+                if (item.transparent) {
+                    transparentItems.push_back(item);
+                } else {
+                    opaqueItems.push_back(item);
+                }
+            }
+            if (!opaqueItems.empty()) {
+                graphics_internal::MeshRenderer::renderMeshes(
+                    commandBuffer, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+                    scene.set(uniformSlot), pendingViewProj,
+                    opaqueItems, meshStore.resources(), mainMeshPipeline, materialSetsArg, defaultMaterialArg);
+            }
+            const VkPipeline transparentPipeline =
+                useHdr ? pipelines.hdrMeshTransparentPipeline : pipelines.meshTransparentPipeline;
+            if (!transparentItems.empty() && transparentPipeline != VK_NULL_HANDLE) {
+                graphics_internal::MeshRenderer::renderMeshes(
+                    commandBuffer, pipelines.meshPipeline, pipelines.meshPipelineLayout,
+                    scene.set(uniformSlot), pendingViewProj,
+                    transparentItems, meshStore.resources(), transparentPipeline, materialSetsArg, defaultMaterialArg);
+            }
         }
         vkCmdEndRenderPass(commandBuffer);
     }

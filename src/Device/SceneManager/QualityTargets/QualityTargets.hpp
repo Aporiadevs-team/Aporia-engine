@@ -91,6 +91,24 @@ struct QualityTargets {
     ShadowRenderer::Resources shadow;
     VkDescriptorSet tonemapDescriptorSet = VK_NULL_HANDLE;
 
+    // Volumetric sun shafts (ray marched in the tonemap pass). The depth sampler
+    // reads the stored scene depth; the uniform buffer carries the camera/sun
+    // matrices and the scattering parameters.
+    struct VolumetricUniforms {
+        float invViewProj[16];
+        float sunViewProj[16];
+        float cameraPosition[4];
+        float sunDirection[4]; // xyz toward sun, w intensity
+        float sunColor[4];     // rgb, a
+        float params[4];       // x density, y phaseG, z maxDistance, w steps
+    };
+    VkSampler tonemapDepthSampler = VK_NULL_HANDLE;
+    VkBuffer tonemapVolumetricBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory tonemapVolumetricMemory = VK_NULL_HANDLE;
+
+    // Updates the volumetric uniform buffer (safe to call every frame).
+    bool writeTonemapVolumetric(const VolumetricUniforms& uniforms) noexcept;
+
     void setDevice(const Device& device) noexcept { gpu = device; }
 
     [[nodiscard]] VkFormat chooseDepthFormat() const noexcept;

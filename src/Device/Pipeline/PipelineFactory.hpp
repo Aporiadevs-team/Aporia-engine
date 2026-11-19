@@ -27,6 +27,9 @@ struct PipelineSet {
     VkPipelineLayout meshPipelineLayout = VK_NULL_HANDLE;
     VkPipeline meshPipeline = VK_NULL_HANDLE;
     VkPipeline hdrMeshPipeline = VK_NULL_HANDLE;
+    // Alpha-blended, depth-write-off variants of the mesh pipelines (glass).
+    VkPipeline meshTransparentPipeline = VK_NULL_HANDLE;
+    VkPipeline hdrMeshTransparentPipeline = VK_NULL_HANDLE;
 
     // Shadow depth pass.
     VkShaderModule shadowVertexShader = VK_NULL_HANDLE;
@@ -61,6 +64,24 @@ struct PipelineContext {
     bool reflectionsEnabled = false;
     std::int32_t shadowTaps = 9;
 };
+
+// Mesh pipeline inputs. `layout`, both shader modules and `renderPass` must be
+// valid; `hdrRenderPass` may be null (the HDR variants are then skipped).
+struct MeshPipelineContext {
+    VkDevice device = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkRenderPass hdrRenderPass = VK_NULL_HANDLE;
+    std::int32_t shadowTaps = 9;
+    bool reflectionsEnabled = false;
+};
+
+// Creates the four mesh pipelines (opaque + alpha-blended, main + HDR variant)
+// that share one layout. Used both at bring-up and when a quality preset changes
+// the specialization constants, so transparent items never keep stale taps.
+bool createMeshPipelines(const MeshPipelineContext& context, PipelineSet& out, std::string& error);
 
 // Creates the shader modules, descriptor layouts/pools and pipelines. On
 // failure `error` receives a message and false is returned; already-created
