@@ -9,7 +9,7 @@
 
 #include "TextureStore.hpp"
 
-#include "Graphics/GlobalDrawer/Support/Support.hpp"
+#include "Graphics/Support/Support.hpp"
 
 #include <cstdio>
 #include <limits>
@@ -255,6 +255,36 @@ bool TextureStore::bind(TextureHandle handle, SceneBindings& scene, std::uint32_
     return true;
 }
 
+bool TextureStore::bindAll(TextureHandle handle, SceneBindings& scene, std::string& error) {
+    if (descriptorSet_ == VK_NULL_HANDLE || !handle.valid()) {
+        error = "Texture descriptor is not available";
+        return false;
+    }
+    const auto textureIt = textures_.find(handle.value());
+    if (textureIt == textures_.end()) {
+        error = "Texture handle is invalid";
+        return false;
+    }
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler = textureIt->second.sampler;
+    imageInfo.imageView = textureIt->second.view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = descriptorSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device_.device, 1, &write, 0, nullptr);
+    boundTexture_ = handle;
+    for (std::uint32_t slot = 0; slot < SceneBindings::kSlots; ++slot) {
+        scene.bindAlbedo(slot, textureIt->second.view, textureIt->second.sampler);
+    }
+    return true;
+}
+
 TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings& scene, std::string& error) {
     
     if (nextTextureId_ == 0) {
@@ -295,8 +325,11 @@ TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings
     }
 
     const TextureHandle handle{id};
-    if (!bind(handle, scene, 0, error)) {
-        
+    // Creating a per-item texture must not hijack the frame-wide albedo. The
+    // old code bound the new texture to the current ring slot only, which left
+    // the other slots sampling the previous texture; hosts had to rebind for
+    // several frames to heal it. Keep the bound texture on every slot instead.
+    if (boundTexture_.valid() && !bindAll(boundTexture_, scene, error)) {
         const auto textureIt = textures_.find(id);
         if (textureIt != textures_.end()) {
             TextureManager::destroyResource(device_.device, textureIt->second);
@@ -304,7 +337,6 @@ TextureHandle TextureStore::create(const TextureDesc& description, SceneBindings
         }
         return invalidTextureHandle;
     }
-    
     return handle;
 }
 
@@ -345,7 +377,7 @@ void TextureStore::destroy(TextureHandle handle, SceneBindings& scene, std::stri
         error = "Default texture is unavailable";
         return;
     }
-    if (boundTexture_ == handle && !bind(defaultTexture_, scene, 0, error)) {
+    if (boundTexture_ == handle && !bindAll(defaultTexture_, scene, error)) {
         return;
     }
     TextureManager::destroyResource(device_.device, textureIt->second);
@@ -359,8 +391,12 @@ void TextureStore::destroy(TextureHandle handle, SceneBindings& scene, std::stri
     }
     const auto boundIt = textures_.find(boundTexture_.value());
     if (boundIt != textures_.end()) {
-        // After vkDeviceWaitIdle all slots are safe.
-        scene.bindAlbedo(0, boundIt->second.view, boundIt->second.sampler);
+        // vkDeviceWaitIdle above makes every ring slot safe to rewrite. All of
+        // them have to move: writing only the current slot leaves the other one
+        // sampling the view that was just destroyed.
+        for (std::uint32_t slot = 0; slot < SceneBindings::kSlots; ++slot) {
+            scene.bindAlbedo(slot, boundIt->second.view, boundIt->second.sampler);
+        }
     }
 }
 

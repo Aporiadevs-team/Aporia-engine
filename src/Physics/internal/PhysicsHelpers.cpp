@@ -177,14 +177,19 @@ Vec3 inverseInertiaFor(const Body& body) noexcept {
         return {inverse, inverse, inverse};
     }
 
-    // Capsule path:
+    // Capsule path: the segment runs along local Z, so the axial moment is the
+    // cylinder's m·r²/2 while the two transverse axes use the full formula.
+    // Using the transverse value on all three axes made roll about the capsule
+    // axis 2-5x too heavy.
     const double r2 = body.radius * body.radius;
     const double h2 = body.halfHeight * body.halfHeight;
     // Use 2.4 instead of 3.0 for the spherical factor to account for the
     // end-caps.  This gives ~20% more rotational inertia than the old code.
-    const double inertia = mass * (2.4 * r2 + h2 / 3.0);
-    const double inverse = inertia > 0.0 ? 1.0 / inertia : 0.0;
-    return {inverse, inverse, inverse};
+    const double transverse = mass * (2.4 * r2 + h2 / 3.0);
+    const double axial = 0.5 * mass * r2;
+    const double inverseTransverse = transverse > 0.0 ? 1.0 / transverse : 0.0;
+    const double inverseAxial = axial > 0.0 ? 1.0 / axial : 0.0;
+    return {inverseTransverse, inverseTransverse, inverseAxial};
 }
 
 double projectedRadius(const Body& body, const std::array<Vec3, 3>& axes, const Vec3& axis) noexcept {

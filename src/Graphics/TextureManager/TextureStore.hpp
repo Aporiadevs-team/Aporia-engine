@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Aporia/Graphics/Graphics.hpp"
-#include "Device/SceneManager/SceneBindings/SceneBindings.hpp"
+#include "Graphics/SceneManager/SceneBindings/SceneBindings.hpp"
 #include "Graphics/TextureManager/TextureManager.hpp"
 
 #include <cstddef>
@@ -37,6 +37,10 @@ public:
     [[nodiscard]] TextureHandle create(const TextureDesc& description, SceneBindings& scene, std::string& error);
     bool update(TextureHandle handle, const void* pixels, std::size_t dataSize, std::string& error);
     bool bind(TextureHandle handle, SceneBindings& scene, std::uint32_t frameSlot, std::string& error);
+    // Makes `handle` the frame-wide albedo on every ring slot. Hosts that want
+    // a texture to outlive the next frame must use this, not bind(): the ring
+    // slots are sampled round-robin, so a one-slot bind desynchronises them.
+    bool bindAll(TextureHandle handle, SceneBindings& scene, std::string& error);
     void destroy(TextureHandle handle, SceneBindings& scene, std::string& error);
 
     // Frees the device image/sampler of every texture and the descriptor set.

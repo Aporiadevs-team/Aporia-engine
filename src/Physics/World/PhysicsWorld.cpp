@@ -40,6 +40,14 @@ struct PhysicsWorld::Impl {
     double sleepThreshold = 0.03; // m/s linear velocity
     double sleepCounterLimit = 6; // frames below threshold before sleep
 
+    // Single source of truth for "this body does not participate in the solver".
+    // It must be used by the integrator, the broad phase and the contact loop so
+    // they never disagree about who is sleeping.
+    [[nodiscard]] bool isAsleep(const apr::Body& body) const noexcept {
+        return !body.settings.isStatic && body.settings.mass > 0.0 &&
+               body.sleepCounter >= static_cast<int>(sleepCounterLimit);
+    }
+
     static std::uint64_t packCell(std::int32_t x, std::int32_t y, std::int32_t z) noexcept {
         const std::uint64_t bx = static_cast<std::uint32_t>(x) & 0x1FFFFFu;
         const std::uint64_t by = static_cast<std::uint32_t>(y) & 0x1FFFFFu;
@@ -93,7 +101,7 @@ struct PhysicsWorld::Impl {
     // Smooth body-turn predictor: a rate-limited wheel plus a bicycle-model yaw
     // rate, limited by grip and modulated by slope, mass/inertia and shape.
     void applySteering(apr::Body& body, double deltaSeconds) noexcept {
-        if (!body.steeringEnabled || body.settings.isStatic) {
+        if (!body.steeringEnabled || body.settings.isStatic || isAsleep(body)) {
             return;
         }
         const SteeringConfig& config = body.steering;
@@ -187,14 +195,16 @@ struct PhysicsWorld::Impl {
         for (apr::Body& body : bodies) {
             body.onGround = false;
         }
+        // A contact supports a body only when its normal pushes that body up.
+        // The normal runs first -> second, so first is lifted along -normal and
+        // second along +normal. Wall and ceiling hits must not count as ground.
+        constexpr double kGroundNormalMinZ = 0.7;
         for (const apr::ActiveContact& contact : activeContacts) {
-            apr::Body& first = bodies[contact.firstIndex];
-            apr::Body& second = bodies[contact.secondIndex];
-            if (first.colliderType != apr::ColliderType::Heightfield) {
-                first.onGround = true;
-            }
-            if (second.colliderType != apr::ColliderType::Heightfield) {
-                second.onGround = true;
+            const double normalZ = contact.contact.normal.z;
+            if (normalZ < -kGroundNormalMinZ) {
+                bodies[contact.firstIndex].onGround = true;
+            } else if (normalZ > kGroundNormalMinZ) {
+                bodies[contact.secondIndex].onGround = true;
             }
         }
 
@@ -204,12 +214,16 @@ struct PhysicsWorld::Impl {
                 continue;
             }
 
-            // Skip sleeping bodies — they are stable and don't need solving.
-            if (body.sleepCounter > 0) {
+            // Only a fully asleep body skips integration. A body below the
+            // threshold but not yet at the limit still falls: gravity has to
+            // keep acting on it, otherwise a jump apex freezes it mid-air.
+            if (isAsleep(body)) {
                 // Wake up if forces were applied.
                 if (body.force.lengthSquared() > 1.0e-6 || body.torque.lengthSquared() > 1.0e-6) {
                     body.sleepCounter = 0;
                 } else {
+                    body.force = {};
+                    body.torque = {};
                     continue;
                 }
             }
@@ -237,24 +251,38 @@ struct PhysicsWorld::Impl {
             applySteering(body, deltaSeconds);
         }
 
-        // Sleep check: bodies with velocity below threshold increment their
-        // counter; once it exceeds the limit they stop participating in the
-        // solver until woken by an external force or collision.
+        resolveCollisions();
+
+        // Sleep bookkeeping runs after the solve: one substep of gravity alone
+        // is faster than the sleep threshold, so a resting body only looks slow
+        // once the contact solver has cancelled that velocity. A body may sleep
+        // only while supported from below; otherwise a slow body in free flight
+        // would freeze in place. An already sleeping body keeps its counter so
+        // the terrain loop can skip it until something wakes it.
         for (apr::Body& body : bodies) {
             if (body.settings.isStatic || body.settings.mass <= 0.0) {
                 continue;
             }
-            const double speed = body.velocity.length();
-            if (speed > sleepThreshold) {
-                body.sleepCounter = 0; // wake
-            } else if (body.force.lengthSquared() > 1.0e-6 || body.torque.lengthSquared() > 1.0e-6) {
-                body.sleepCounter = 0; // wake on force
-            } else {
+            if (isAsleep(body)) {
+                continue;
+            }
+            const double speedSquared = body.velocity.lengthSquared();
+            const bool restless = speedSquared > sleepThreshold * sleepThreshold ||
+                                  !body.onGround ||
+                                  body.force.lengthSquared() > 1.0e-6 ||
+                                  body.torque.lengthSquared() > 1.0e-6;
+            if (restless) {
+                body.sleepCounter = 0;
+                continue;
+            }
+            if (body.sleepCounter < static_cast<int>(sleepCounterLimit)) {
                 ++body.sleepCounter;
             }
+            if (isAsleep(body)) {
+                body.velocity = {};
+                body.angularVelocity = {};
+            }
         }
-
-        resolveCollisions();
     }
 
     BodyHandle add(
@@ -475,23 +503,40 @@ struct PhysicsWorld::Impl {
     }
 
     // Positional correction runs once per step (not per iteration) with slop so
-    // resting bodies do not get pushed apart every iteration.
+    // resting bodies do not get pushed apart every iteration. Contacts of one
+    // pair form a manifold: correcting every point separately would push a box
+    // out four times (one per resting corner), so a pair is corrected once by
+    // its deepest contact.
     void correctPositions() noexcept {
-        for (const apr::ActiveContact& item : activeContacts) {
-            apr::Body& first = bodies[item.firstIndex];
-            apr::Body& second = bodies[item.secondIndex];
+        std::size_t index = 0;
+        while (index < activeContacts.size()) {
+            const std::size_t firstIndex = activeContacts[index].firstIndex;
+            const std::size_t secondIndex = activeContacts[index].secondIndex;
+            double deepest = activeContacts[index].contact.penetration;
+            Vec3 normal = activeContacts[index].contact.normal;
+            while (index < activeContacts.size() &&
+                   activeContacts[index].firstIndex == firstIndex &&
+                   activeContacts[index].secondIndex == secondIndex) {
+                if (activeContacts[index].contact.penetration > deepest) {
+                    deepest = activeContacts[index].contact.penetration;
+                    normal = activeContacts[index].contact.normal;
+                }
+                ++index;
+            }
+            apr::Body& first = bodies[firstIndex];
+            apr::Body& second = bodies[secondIndex];
             const double firstInverseMass = inverseMass(first);
             const double secondInverseMass = inverseMass(second);
             const double inverseMassSum = firstInverseMass + secondInverseMass;
             if (inverseMassSum <= 0.0) {
                 continue;
             }
-            const double separation = item.contact.penetration - apr::kLinearSlop;
+            const double separation = deepest - apr::kLinearSlop;
             if (separation <= 0.0) {
                 continue;
             }
             const double magnitude = std::min(separation * apr::kPositionCorrection, apr::kMaxCorrection);
-            const Vec3 correction = item.contact.normal * (magnitude / inverseMassSum);
+            const Vec3 correction = normal * (magnitude / inverseMassSum);
             first.settings.position -= correction * firstInverseMass;
             second.settings.position += correction * secondInverseMass;
         }
@@ -546,9 +591,11 @@ struct PhysicsWorld::Impl {
             if (inverseMass(first) <= 0.0 && inverseMass(second) <= 0.0) {
                 return;
             }
-            // Wake both bodies on contact — at least one is moving.
-            if (first.sleepCounter > 0) first.sleepCounter = 0;
-            if (second.sleepCounter > 0) second.sleepCounter = 0;
+            const bool firstAsleep = isAsleep(first);
+            const bool secondAsleep = isAsleep(second);
+            if (firstAsleep && secondAsleep) {
+                return; // two sleepers cannot change each other
+            }
             const Vec3 delta = second.settings.position - first.settings.position;
             const double reach = first.boundingRadius + second.boundingRadius;
             const bool hasHeightfield = first.colliderType == apr::ColliderType::Heightfield ||
@@ -557,6 +604,26 @@ struct PhysicsWorld::Impl {
                 return;
             }
             detectContacts(first, second, scratchContacts);
+            if (scratchContacts.empty()) {
+                return;
+            }
+            // A sleeper is woken only by something that is actually moving;
+            // otherwise two resting neighbours keep waking each other forever.
+            const auto isActive = [&](const apr::Body& body) noexcept {
+                return body.velocity.lengthSquared() > sleepThreshold * sleepThreshold ||
+                       body.force.lengthSquared() > 1.0e-6 ||
+                       body.torque.lengthSquared() > 1.0e-6;
+            };
+            if (firstAsleep && !secondAsleep && isActive(second)) {
+                first.sleepCounter = 0;
+            } else if (secondAsleep && !firstAsleep && isActive(first)) {
+                second.sleepCounter = 0;
+            }
+            // Do not hand a sleeping body to the solver: it would be pushed
+            // around while its transform stays frozen.
+            if (isAsleep(first) || isAsleep(second)) {
+                return;
+            }
             for (const apr::Contact& c : scratchContacts) {
                 apr::ActiveContact active;
                 active.firstIndex = firstIndex;
@@ -576,14 +643,8 @@ struct PhysicsWorld::Impl {
             if (body.colliderType == apr::ColliderType::Heightfield) {
                 continue;
             }
-            // Only skip bodies that are both sleeping AND dynamic — static bodies
-            // never sleep and must always participate in broadphase.  Sleeping
-            // dynamic bodies are still inserted so that an active body that falls
-            // onto them triggers considerPair which wakes the sleeper.
-            const bool isStatic = body.settings.isStatic || body.settings.mass <= 0.0;
-            if (!isStatic && body.sleepCounter >= static_cast<int>(sleepCounterLimit)) {
-                continue;
-            }
+            // Sleeping bodies stay in the grid: an active body falling onto one
+            // must be able to form the pair that wakes it.
             std::int32_t x0, y0, z0, x1, y1, z1;
             gridRange(body, cellSize, x0, y0, z0, x1, y1, z1);
             for (std::int32_t x = x0; x <= x1; ++x) {
@@ -599,13 +660,6 @@ struct PhysicsWorld::Impl {
         for (std::size_t firstIndex = 0; firstIndex < bodies.size(); ++firstIndex) {
             const apr::Body& first = bodies[firstIndex];
             if (first.colliderType == apr::ColliderType::Heightfield) {
-                continue;
-            }
-            // Skip sleeping bodies as the "first" in a pair — they are still in
-            // the grid so an active body that reaches them will call
-            // considerPair and wake the sleeper.  Static bodies never sleep.
-            const bool isStatic = first.settings.isStatic || first.settings.mass <= 0.0;
-            if (!isStatic && first.sleepCounter >= static_cast<int>(sleepCounterLimit)) {
                 continue;
             }
             ++pairStampCounter;
@@ -631,12 +685,23 @@ struct PhysicsWorld::Impl {
         }
 
         for (std::size_t fieldIndex = 0; fieldIndex < bodies.size(); ++fieldIndex) {
-            if (bodies[fieldIndex].colliderType != apr::ColliderType::Heightfield) {
+            const apr::Body& field = bodies[fieldIndex];
+            if (field.colliderType != apr::ColliderType::Heightfield) {
                 continue;
             }
+            // Heightfield sampling is the most expensive narrow phase, so prune
+            // before it: a body wholly above the highest terrain point cannot
+            // touch the surface, and a sleeping body needs no contact at all
+            // (it is woken by forces and by other bodies, not by static ground).
+            const Vec3 fieldUp = field.terrainDescription.orientation.normalized().rotate({0.0, 0.0, 1.0});
+            const double highestWorld = dot(field.settings.position, fieldUp) + field.terrainField.maxHeight;
             for (std::size_t bodyIndex = 0; bodyIndex < bodies.size(); ++bodyIndex) {
-                if (bodies[bodyIndex].colliderType == apr::ColliderType::Heightfield ||
-                    inverseMass(bodies[bodyIndex]) <= 0.0) {
+                const apr::Body& body = bodies[bodyIndex];
+                if (body.colliderType == apr::ColliderType::Heightfield ||
+                    inverseMass(body) <= 0.0 || isAsleep(body)) {
+                    continue;
+                }
+                if (dot(body.settings.position, fieldUp) - body.boundingRadius > highestWorld) {
                     continue;
                 }
                 considerPair(std::min(fieldIndex, bodyIndex), std::max(fieldIndex, bodyIndex));

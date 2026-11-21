@@ -35,6 +35,13 @@ void main() {
     int charIndex = gl_VertexIndex / 6;
     int vertexIndex = gl_VertexIndex % 6;
 
+    // Never index past the uploaded batch: the buffer holds exactly
+    // MaxGlyphs entries, and a draw range larger than the upload would read
+    // arbitrary memory (undefined positions/UVs, driver faults).
+    if (charIndex >= font.charCount.x) {
+        charIndex = max(font.charCount.x - 1, 0);
+    }
+
     vec4 posSize = font.chars[charIndex * 4];
     vec4 uvCoords = font.chars[charIndex * 4 + 1];
     vec4 color = font.chars[charIndex * 4 + 2];

@@ -17,6 +17,10 @@
 #include "Aporia/Input/Input.hpp"
 #endif
 
+#if defined(APORIA_ENGINE_HAS_PHYSICS)
+#include "Aporia/Physics/Camera.hpp"
+#endif
+
 namespace {
 
 int failures = 0;
@@ -179,6 +183,66 @@ int main() {
     std::cout << "[terrain] box pos z=" << boxPosition.z << " ground=" << boxGround << '\n';
     check(boxPosition.z > boxGround - 1.5 && boxPosition.z < boxGround + 1.5,
           "box must rest near the terrain surface");
+
+    // Sleep system: an unsupported slow body must keep falling (gravity is not
+    // skipped before the sleep counter reaches its limit), and a settled body
+    // must sleep instead of staying awake forever on the terrain.
+    {
+        Aporia::Game airGame;
+        Aporia::BoxBodyConfig floater;
+        floater.position = Aporia::Vec3{0.0, 0.0, 10.0};
+        floater.linearVelocity = Aporia::Vec3{0.0, 0.0, 0.01};
+        floater.halfExtents = Aporia::Vec3{0.5, 0.5, 0.5};
+        const Aporia::BodyHandle slowBody = airGame.physics().createBox(floater);
+        for (int index = 0; index < 30; ++index) {
+            airGame.step(1.0 / 60.0);
+        }
+        const Aporia::Vec3 slowPosition = airGame.physics().bodyPosition(slowBody);
+        check(slowPosition.z < 9.0, "a slow airborne body must keep falling, not freeze mid-air");
+
+        Aporia::TerrainDesc flatDescription;
+        flatDescription.gridResolution = 8;
+        flatDescription.worldSize = 64.0f;
+        flatDescription.heightScale = 0.0f;
+        flatDescription.heightOffset = 0.0f;
+        flatDescription.noiseOctaves = 1;
+        const Aporia::TerrainHeightfield flatField = Aporia::generateTerrainHeightfield(flatDescription);
+
+        Aporia::Game restGame;
+        restGame.physics().createHeightfield(flatDescription, flatField);
+        Aporia::BoxBodyConfig sleeper;
+        sleeper.position = Aporia::Vec3{0.0, 0.0, 0.45};
+        sleeper.halfExtents = Aporia::Vec3{0.5, 0.5, 0.5};
+        sleeper.restitution = 0.0;
+        sleeper.friction = 0.9;
+        const Aporia::BodyHandle sleepingBox = restGame.physics().createBox(sleeper);
+        for (int index = 0; index < 120; ++index) {
+            restGame.step(1.0 / 60.0);
+        }
+        const Aporia::Vec3 restPosition = restGame.physics().bodyPosition(sleepingBox);
+        check(std::abs(restGame.physics().bodyVelocity(sleepingBox).z) < 1.0e-9,
+              "a body at rest on the terrain must fall asleep (velocity zeroed)");
+        for (int index = 0; index < 120; ++index) {
+            restGame.step(1.0 / 60.0);
+        }
+        const Aporia::Vec3 stillPosition = restGame.physics().bodyPosition(sleepingBox);
+        check((stillPosition - restPosition).length() < 1.0e-9, "a sleeping body must not drift on the terrain");
+
+        // A sleeping body stays a real collider: a box dropped onto it stacks
+        // instead of passing through.
+        Aporia::BoxBodyConfig dropper;
+        dropper.position = Aporia::Vec3{0.0, 0.0, 2.4};
+        dropper.halfExtents = Aporia::Vec3{0.5, 0.5, 0.5};
+        dropper.restitution = 0.0;
+        dropper.friction = 0.9;
+        const Aporia::BodyHandle droppedBox = restGame.physics().createBox(dropper);
+        for (int index = 0; index < 240; ++index) {
+            restGame.step(1.0 / 60.0);
+        }
+        const double droppedZ = restGame.physics().bodyPosition(droppedBox).z;
+        std::cout << "[sleep] dropped box z=" << droppedZ << '\n';
+        check(droppedZ > 1.1, "a body must not fall through a sleeping body");
+    }
 
     // City generation: infinite streaming world, deterministic blocks.
     Aporia::CityDesc cityDescription;
@@ -681,6 +745,72 @@ int main() {
     // raycastAll sorted check
     const Aporia::RaycastHit hitZShort = raycastWorld.raycast(rayZ, 2.0);
     check(!hitZShort.hasHit, "raycast with short maxDistance must not hit distant object");
+#endif
+
+#if defined(APORIA_ENGINE_HAS_PHYSICS)
+    // --- Camera effects: mass-derived gait, seat push, free flight ---
+    {
+        const double frame = 1.0 / 60.0;
+
+        Aporia::CameraEffects walker;
+        walker.setMassKg(75.0);
+        for (int i = 0; i < 180; ++i) {
+            walker.update(frame, {1.4, 0.0, 0.0}, true);
+        }
+        check(std::abs(walker.cadenceHz() - 1.944) < 0.06, "75 kg at 1.4 m/s must step at ~1.94 Hz");
+        check(std::abs(walker.stepLengthM() - 0.72) < 1.0e-9, "reference mass must keep the reference step length");
+
+        double peakSway = 0.0;
+        for (int i = 0; i < 240; ++i) {
+            walker.update(frame, {1.4, 0.0, 0.0}, true);
+            const double sway = std::abs(walker.offset().positionM.z);
+            if (peakSway < sway) {
+                peakSway = sway;
+            }
+        }
+        check(peakSway > 0.012 && peakSway < 0.030, "75 kg gait sway must stay in the 1.2-3 cm band");
+
+        for (int i = 0; i < 240; ++i) {
+            walker.update(frame, {0.0, 0.0, 0.0}, true);
+        }
+        check(std::abs(walker.offset().positionM.z) < 1.0e-3, "idle body must settle the sway to zero");
+        check(std::abs(walker.offset().rollRad) < 1.0e-3, "idle body must settle the roll to zero");
+
+        Aporia::CameraEffects heavy;
+        heavy.setMassKg(4000.0);
+        check(std::abs(heavy.stepLengthM() - 2.705) < 0.05, "step length must scale as mass^(1/3)");
+        for (int i = 0; i < 180; ++i) {
+            heavy.update(frame, {1.2, 0.0, 0.0}, true);
+        }
+        check(std::abs(heavy.cadenceHz() - 0.444) < 0.05, "a 4000 kg body must move at a slow cadence");
+
+        Aporia::CameraEffects muted;
+        muted.setIntensity(0.0);
+        for (int i = 0; i < 120; ++i) {
+            muted.update(frame, {1.4, 0.0, 0.0}, true);
+        }
+        check(muted.offset().positionM.length() < 1.0e-12, "zero intensity must emit no offset");
+
+        Aporia::CameraEffects rider;
+        Aporia::Vec3 riderVelocity{};
+        double seatPush = 0.0;
+        for (int i = 0; i < 60; ++i) {
+            riderVelocity += Aporia::Vec3{10.0 * frame, 0.0, 0.0};
+            rider.update(frame, riderVelocity, true);
+            const double push = std::abs(rider.offset().positionM.x);
+            if (seatPush < push) {
+                seatPush = push;
+            }
+        }
+        check(seatPush > 0.005, "forward acceleration must push the eye backwards");
+        check(seatPush <= rider.config().seatMaxM + 1.0e-9, "seat push must stay bounded");
+
+        Aporia::FreeFlyState fly{};
+        Aporia::freeFlyStep(fly, 1.0, {0.0, 0.0, 1.0}, false, Aporia::FreeFlyConfig{});
+        check(std::abs(fly.position.x - 8.0) < 1.0e-9, "free flight must advance along yaw at base speed");
+        check(std::abs(fly.position.y) < 1.0e-12 && std::abs(fly.position.z) < 1.0e-12,
+              "free flight must not drift sideways");
+    }
 #endif
 
     if (failures == 0) {

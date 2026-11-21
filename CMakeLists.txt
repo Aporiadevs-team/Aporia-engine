@@ -24,7 +24,7 @@ target_compile_definitions(AporiaEngine PRIVATE APORIA_BUILDING_LIBRARY)
 target_compile_definitions(AporiaEngine INTERFACE APORIA_USING_LIBRARY)
 
 # stb_truetype emits a wall of warnings; silence it for that single file.
-set_source_files_properties(src/Graphics/GlobalDrawer/Text/FontAtlasBuilder.cpp
+set_source_files_properties(src/Graphics/Text/FontAtlasBuilder.cpp
     PROPERTIES COMPILE_OPTIONS "/w")
 
 if(MSVC)

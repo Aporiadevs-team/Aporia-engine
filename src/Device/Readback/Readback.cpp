@@ -1,7 +1,7 @@
 #include "Readback.hpp"
 
 #include "Device/MemoryManager/MemoryManager.hpp"
-#include "Graphics/GlobalDrawer/GraphicsImpl.hpp"
+#include "Graphics/GraphicsImpl.hpp"
 
 #include <cstring>
 
@@ -13,14 +13,45 @@ static std::uint8_t toSrgb(float v) noexcept {
     return static_cast<std::uint8_t>(std::round(v * 255.0f));
 }
 
+// IEEE 754 binary16 -> binary32. The HDR target is R16G16B16A16_SFLOAT, i.e.
+// four half floats per texel (8 bytes), not four full floats.
+static float halfToFloat(std::uint16_t h) noexcept {
+    const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
+    const std::uint32_t exponent = (h >> 10) & 0x1Fu;
+    const std::uint32_t mantissa = h & 0x3FFu;
+    std::uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign; // +-0
+        } else {
+            // Subnormal half: normalize it into a float.
+            std::uint32_t m = mantissa;
+            std::uint32_t e = 127 - 15 + 1;
+            while ((m & 0x400u) == 0) {
+                m <<= 1;
+                --e;
+            }
+            m &= 0x3FFu;
+            bits = sign | (e << 23) | (m << 13);
+        }
+    } else if (exponent == 0x1Fu) {
+        bits = sign | 0x7F800000u | (mantissa << 13); // inf / nan
+    } else {
+        bits = sign | ((exponent + (127 - 15)) << 23) | (mantissa << 13);
+    }
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
 static bool convertHdrToLdr(const std::uint8_t* src, std::uint8_t* dst, std::size_t width, std::size_t height) {
-    const float* pixels = reinterpret_cast<const float*>(src);
+    const std::uint16_t* pixels = reinterpret_cast<const std::uint16_t*>(src);
     for (std::size_t y = 0; y < height; ++y) {
         for (std::size_t x = 0; x < width; ++x) {
             const std::size_t idx = y * width + x;
-            const float r = pixels[idx * 4 + 0];
-            const float g = pixels[idx * 4 + 1];
-            const float b = pixels[idx * 4 + 2];
+            const float r = halfToFloat(pixels[idx * 4 + 0]);
+            const float g = halfToFloat(pixels[idx * 4 + 1]);
+            const float b = halfToFloat(pixels[idx * 4 + 2]);
             // ACES filmic tone mapping
             const float a = 2.51f, b_val = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
             const float rt = (r * (a * r + b_val)) / (r * (c * r + d) + e);
@@ -223,16 +254,13 @@ bool Graphics::readbackPixels(std::vector<std::uint8_t>& pixels) const {
     context.memoryProperties = impl_->memoryProperties;
     context.commandBuffer = impl_->commandBuffer;
     context.queue = impl_->queue;
-    // In HDR mode the tonemap pass (which includes SMAA/TAA) writes into
-    // hdrImage (R16G16B16A16_SFLOAT). Only fall back to colorImage when HDR is
-    // disabled. Mark HDR format so readback can convert to LDR.
-    context.colorImage = impl_->hdrImage != VK_NULL_HANDLE && impl_->hdrEnabled ?
-                         impl_->hdrImage : impl_->colorImage;
-    context.width = impl_->hdrEnabled && impl_->hdrWidth > 0 ?
-                    impl_->hdrWidth : impl_->renderWidth;
-    context.height = impl_->hdrEnabled && impl_->hdrHeight > 0 ?
-                     impl_->hdrHeight : impl_->renderHeight;
-    context.isHdrFormat = impl_->hdrEnabled && impl_->hdrImage != VK_NULL_HANDLE;
+    // Always sample the headless color target: it is the framebuffer the
+    // final composite is rendered into (HDR tonemap, SMAA/TAA and UI all end
+    // up there), whereas hdrImage only holds the intermediate linear scene.
+    context.colorImage = impl_->colorImage;
+    context.width = impl_->renderWidth;
+    context.height = impl_->renderHeight;
+    context.isHdrFormat = false;
     return graphics_internal::readbackColorImage(context, pixels);
 }
 

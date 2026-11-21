@@ -1,4 +1,4 @@
-#include "Graphics/GlobalDrawer/GraphicsImpl.hpp"
+#include "Graphics/GraphicsImpl.hpp"
 
 #include <string>
 
@@ -52,10 +52,11 @@ bool Graphics::setTexture2D(TextureHandle handle) noexcept {
         return false;
     }
     std::string error;
-    // Pass the next frame slot so only that descriptor set is updated.
-    // Other ring slots may still be read by in-flight GPU commands.
-    const std::uint32_t frameSlot = impl_->currentFrameSlot;
-    if (!impl_->textureStore.bind(handle, impl_->scene, frameSlot, error)) {
+    // Every ring slot has to sample the new texture: the frame that renders
+    // next may use any of them, so binding only currentFrameSlot left the
+    // other slots pointing at the previous texture (one-frame flicker, and a
+    // dangling view after a destroy).
+    if (!impl_->textureStore.bindAll(handle, impl_->scene, error)) {
         impl_->lastError = error;
         return false;
     }

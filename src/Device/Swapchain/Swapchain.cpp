@@ -9,8 +9,8 @@
 
 #include "Swapchain.hpp"
 
-#include "Device/SceneManager/Depth/DepthTarget.hpp"
-#include "Graphics/GlobalDrawer/Support/Support.hpp"
+#include "Device/Format/Format.hpp"
+#include "Graphics/SceneManager/Depth/DepthTarget.hpp"
 
 #include <algorithm>
 #include <array>
@@ -31,6 +31,89 @@ void setError(const SwapchainContext& context, const char* message) {
 }
 
 } // namespace
+
+bool chooseSurfaceFormat(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        VkSurfaceFormatKHR& selectedFormat) {
+    std::uint32_t count = 0;
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nullptr) != VK_SUCCESS || count == 0) {
+        return false;
+    }
+    std::vector<VkSurfaceFormatKHR> formats(count);
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, formats.data()) != VK_SUCCESS) {
+        return false;
+    }
+    for (const VkSurfaceFormatKHR& format : formats) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format.format, &properties);
+        if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0) {
+            selectedFormat = format;
+            return true;
+        }
+    }
+    return false;
+}
+
+VkPresentModeKHR choosePresentMode(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        bool vsync) {
+    std::uint32_t count = 0;
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, nullptr) != VK_SUCCESS || count == 0) {
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    std::vector<VkPresentModeKHR> modes(count);
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, modes.data()) != VK_SUCCESS) {
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+
+    const auto has = [&](VkPresentModeKHR mode) {
+        return std::find(modes.begin(), modes.end(), mode) != modes.end();
+    };
+
+    if (vsync) {
+        // FIFO is the only mode guaranteed to be present and it blocks on the
+        // refresh, which is exactly vsync.
+        if (has(VK_PRESENT_MODE_FIFO_KHR)) {
+            return VK_PRESENT_MODE_FIFO_KHR;
+        }
+        return modes.front();
+    }
+
+    // Vsync off: prefer MAILBOX (uncapped, no tearing), then IMMEDIATE.
+    if (has(VK_PRESENT_MODE_MAILBOX_KHR)) {
+        return VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    if (has(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    return modes.front();
+}
+
+bool clientAreaExtent(void* nativeWindow, VkExtent2D& extent) noexcept {
+#if defined(_WIN32)
+    if (nativeWindow == nullptr) {
+        return false;
+    }
+    RECT clientRect{};
+    if (!GetClientRect(static_cast<HWND>(nativeWindow), &clientRect)) {
+        return false;
+    }
+    const int width = clientRect.right - clientRect.left;
+    const int height = clientRect.bottom - clientRect.top;
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+    extent.width = static_cast<std::uint32_t>(width);
+    extent.height = static_cast<std::uint32_t>(height);
+    return true;
+#else
+    (void)nativeWindow;
+    (void)extent;
+    return false;
+#endif
+}
 
 bool configureSurface(const SwapchainContext& context) {
     if (context.state == nullptr) {
@@ -83,7 +166,7 @@ bool createSwapchain(const SwapchainContext& context) {
 
     VkExtent2D clientExtent{};
 #if defined(_WIN32)
-    if (!getWindowExtent(static_cast<HWND>(context.window), clientExtent)) {
+    if (!clientAreaExtent(context.window, clientExtent)) {
         setError(context, "Native window has no drawable client area");
         return false;
     }

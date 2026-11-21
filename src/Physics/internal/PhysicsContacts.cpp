@@ -119,9 +119,13 @@ std::optional<Contact> boxBox(const Body& first, const Body& second) noexcept {
     double smallestOverlap = std::numeric_limits<double>::infinity();
     Vec3 bestContactPoint{};  // will be set when best axis is found
 
-    const auto testAxis = [&](const Vec3& candidate) noexcept {
+    const auto testAxis = [&](const Vec3& candidate, bool isEdge) noexcept {
         const double lengthSquared = candidate.lengthSquared();
-        if (lengthSquared <= std::numeric_limits<double>::epsilon()) {
+        // Both inputs are unit axes, so the squared length is sin² of the angle
+        // between them. Comparing against DBL_EPSILON (2e-16) accepted noise
+        // cross products of nearly parallel faces (~1e-8) and normalized garbage.
+        constexpr double kMinAxisSinSquared = 1.0e-12; // |sin| >= 1e-6
+        if (lengthSquared <= kMinAxisSinSquared) {
             return;
         }
 
@@ -129,12 +133,17 @@ std::optional<Contact> boxBox(const Body& first, const Body& second) noexcept {
         const double projectedDistance = dot(centerSeparation, axis);
         const double overlap = projectedRadius(first, firstAxes, axis) +
                                projectedRadius(second, secondAxes, axis) - std::abs(projectedDistance);
-        if (overlap <= 0.0 || overlap >= smallestOverlap) {
+        // Cross-products of near-parallel faces yield a fake axis whose overlap
+        // is nearly identical to the real face axis. Let face axes win ties so
+        // a settled stack never pivots on numerical noise.
+        constexpr double kEdgeAxisBias = 1.05;
+        const double ranking = isEdge ? overlap * kEdgeAxisBias : overlap;
+        if (overlap <= 0.0 || ranking >= smallestOverlap) {
             return;
         }
 
         const double sign = projectedDistance >= 0.0 ? 1.0 : -1.0;
-        smallestOverlap = overlap;
+        smallestOverlap = ranking;
         // Contact point: the deepest corner of the incident body projected
         // along the contact normal.  The incident body is the one whose face
         // is parallel to the reference face (i.e. the body whose axis aligns
@@ -152,14 +161,14 @@ std::optional<Contact> boxBox(const Body& first, const Body& second) noexcept {
     };
 
     for (const Vec3& axis : firstAxes) {
-        testAxis(axis);
+        testAxis(axis, false);
     }
     for (const Vec3& axis : secondAxes) {
-        testAxis(axis);
+        testAxis(axis, false);
     }
     for (const Vec3& firstAxis : firstAxes) {
         for (const Vec3& secondAxis : secondAxes) {
-            testAxis(cross(firstAxis, secondAxis));
+            testAxis(cross(firstAxis, secondAxis), true);
         }
     }
 
@@ -384,8 +393,12 @@ void boxBoxManifold(const Body& first, const Body& second, std::vector<Contact>&
             separated = true;
             return;
         }
-        if (overlap < smallestOverlap) {
-            smallestOverlap = overlap;
+        // See boxBox(): a near-parallel cross product must not outrank the real
+        // face axis it was derived from.
+        constexpr double kEdgeAxisBias = 1.05;
+        const double ranking = isEdge ? overlap * kEdgeAxisBias : overlap;
+        if (ranking < smallestOverlap) {
+            smallestOverlap = ranking;
             contactNormal = axis * (distance >= 0.0 ? 1.0 : -1.0); // points first -> second
             normalFromFirst = fromFirst;
             edgeAxis = isEdge;
