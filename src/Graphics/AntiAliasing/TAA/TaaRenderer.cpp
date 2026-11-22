@@ -187,7 +187,11 @@ bool TaaRenderer::initialize(const Context& context, std::uint32_t width, std::u
     allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocateInfo.descriptorPool = descriptorPool_;
     allocateInfo.descriptorSetCount = kSlots;
-    allocateInfo.pSetLayouts = &descriptorLayout_;
+    // pSetLayouts must point to descriptorSetCount layouts: the driver reads
+    // kSlots entries, so a single &descriptorLayout_ walks off the end and
+    // hands back an invalid layout (VUID-VkDescriptorSetAllocateInfo).
+    const VkDescriptorSetLayout setLayouts[kSlots] = {descriptorLayout_, descriptorLayout_};
+    allocateInfo.pSetLayouts = setLayouts;
     if (vkAllocateDescriptorSets(device_, &allocateInfo, descriptorSets_) != VK_SUCCESS) {
         return false;
     }
