@@ -9,7 +9,9 @@
 // total = 131 136 B.  chars[] must hold 2048 × 4 = 8192 entries.
 // SSBO (storage buffer) has 128 MiB minimum — no UBO 64 KB limit.
 
-layout(set = 0, binding = 0, std430) buffer FontData {
+// readonly: the vertex stage only reads this buffer, so it must be declared
+// NonWritable (the device does not enable vertexPipelineStoresAndAtomics).
+layout(set = 0, binding = 0, std430) readonly buffer FontData {
     vec4 screenData;    // xy = screen size, z = guiScale, w = outlineWidth
     vec4 outlineColor;  // rgba
     vec4 atlasData;     // xy = atlas size, z = distanceRange, w = fontSize
