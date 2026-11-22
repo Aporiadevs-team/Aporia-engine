@@ -30,6 +30,7 @@
 #include "Graphics/UI/RectRenderer.hpp"
 #include "Graphics/Shadows/ShadowRenderer.hpp"
 #include "Graphics/Lights/LightStore.hpp"
+#include "Graphics/Shaders/ShaderManager.hpp"
 #include "Graphics/Sky/SkyRenderer.hpp"
 #if defined(APORIA_SEASONS)
 #include "Graphics/Weather/PrecipitationRenderer.hpp"
@@ -125,7 +126,9 @@ struct Graphics::Impl : graphics_internal::QualityTargets {
     VkColorSpaceKHR swapchainColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    // Shader modules, pipeline layouts and pipelines for every pass.
+    // Shader modules, pipeline layouts and pipelines for every pass. The
+    // manager owns every VkShaderModule and must outlive the pipelines.
+    graphics_internal::ShaderManager shaders;
     graphics_internal::PipelineSet pipelines;
     // Texture handles, the albedo descriptor set and the geometry store.
     graphics_internal::TextureStore textureStore;

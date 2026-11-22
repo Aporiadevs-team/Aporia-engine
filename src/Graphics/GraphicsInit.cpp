@@ -340,7 +340,8 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
 #if defined(APORIA_EXPERIMENTAL)
     pipelineContext.materialLayout = impl_->materialStore.descriptorSetLayout();
 #endif
-    pipelineContext.shaderDirectory = shaderDirectory;
+    impl_->shaders.setDirectory(shaderDirectory);
+    pipelineContext.shaders = &impl_->shaders;
     pipelineContext.reflectionsEnabled = impl_->reflectionsEnabled;
     pipelineContext.shadowTaps = impl_->shadowTaps;
     pipelineContext.maxLights = static_cast<std::int32_t>(impl_->maxLights);
@@ -354,7 +355,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     if (config.sky) {
         std::string skyError;
         if (!impl_->sky.initialize(impl_->device, impl_->memoryProperties, impl_->renderPass,
-                                   impl_->hdrRenderPass, shaderDirectory, skyError)) {
+                                   impl_->hdrRenderPass, impl_->shaders, skyError)) {
             impl_->setError(skyError);
             shutdown();
             return false;
@@ -365,7 +366,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
     {
         std::string precipitationError;
         if (!impl_->precipitation.initialize(impl_->device, impl_->memoryProperties, impl_->renderPass,
-                                             impl_->hdrRenderPass, shaderDirectory, precipitationError)) {
+                                             impl_->hdrRenderPass, impl_->shaders, precipitationError)) {
             impl_->setError(precipitationError);
             shutdown();
             return false;
@@ -379,7 +380,7 @@ bool Graphics::initialize(const GraphicsContext& context, const GraphicsConfig& 
         if (!impl_->volumetric.initialize(
                 {impl_->device, impl_->physicalDevice, impl_->memoryProperties,
                  impl_->commandBuffer, impl_->queue},
-                shaderDirectory, impl_->shadow.view, impl_->shadow.sampler, volumetricError)) {
+                impl_->shaders, impl_->shadow.view, impl_->shadow.sampler, volumetricError)) {
             impl_->setError(volumetricError);
             shutdown();
             return false;
@@ -434,6 +435,8 @@ void Graphics::Impl::destroy() noexcept {
         destroyDepthResources();
         destroySwapchainResources();
         graphics_internal::destroyPipelines(device, pipelines);
+        // Every renderer has dropped its pipeline by now; the modules can go.
+        shaders.destroy(device);
         sky.shutdown(device);
 #if defined(APORIA_SEASONS)
         precipitation.shutdown(device);
