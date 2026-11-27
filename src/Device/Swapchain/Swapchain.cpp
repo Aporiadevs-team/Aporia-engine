@@ -10,7 +10,7 @@
 #include "Swapchain.hpp"
 
 #include "Device/Format/Format.hpp"
-#include "Graphics/SceneManager/Depth/DepthTarget.hpp"
+#include "Device/SceneManager/Depth/DepthTarget.hpp"
 
 #include <algorithm>
 #include <array>

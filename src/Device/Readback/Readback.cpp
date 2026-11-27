@@ -1,7 +1,7 @@
 #include "Readback.hpp"
 
 #include "Device/MemoryManager/MemoryManager.hpp"
-#include "Graphics/GraphicsImpl.hpp"
+#include "Graphics/Graphics.hpp"
 
 #include <cstring>
 

@@ -3,8 +3,8 @@
 #if defined(APORIA_EXPERIMENTAL)
 
 #include "Device/MemoryManager/MemoryManager.hpp"
-#include "Graphics/Support/Support.hpp"
-#include "Graphics/TextureManager/TextureStore.hpp"
+#include "Core/Support/Support.hpp"
+#include "Graphics/UI/TextureRender/TextureManager/TextureStore.hpp"
 
 #include <array>
 #include <cstring>

@@ -6,7 +6,7 @@
 
 #include <vulkan/vulkan.h>
 
-#include "Graphics/Shaders/ShaderManager.hpp"
+#include "Device/SceneManager/Shaders/ShaderManager.hpp"
 
 #include <cstdint>
 #include <string>
@@ -63,7 +63,7 @@ struct PipelineContext {
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkRenderPass hdrRenderPass = VK_NULL_HANDLE;       // optional
     VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
-    VkDescriptorSetLayout triangleLayout = VK_NULL_HANDLE;  // set 0 for the debug triangle
+    VkDescriptorSetLayout textureSamplerLayout = VK_NULL_HANDLE;  // set 0 for the textured quad pipeline
     VkDescriptorSetLayout sceneLayout = VK_NULL_HANDLE;     // set 0 for mesh/shadow
     VkDescriptorSetLayout materialLayout = VK_NULL_HANDLE;  // set 1 for mesh (experimental, optional)
     VkDescriptorSetLayout textureLayout = VK_NULL_HANDLE;   // per-item albedo: set 1, or set 2 with materials

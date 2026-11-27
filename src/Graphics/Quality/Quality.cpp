@@ -1,6 +1,6 @@
 #include "Quality.hpp"
 
-#include "Graphics/GraphicsImpl.hpp"
+#include "Graphics/Graphics.hpp"
 
 #include <algorithm>
 #include <string>

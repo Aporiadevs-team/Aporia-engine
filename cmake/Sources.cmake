@@ -7,8 +7,9 @@
 file(GLOB APORIA_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
 # Core (Game/Scene) moved into src/Core during the 1.0.0 layout pass; it is
-# always part of the library, whatever optional modules are on.
-file(GLOB APORIA_CORE_SOURCES CONFIGURE_DEPENDS
+# always part of the library, whatever optional modules are on. Recursive so
+# relocated modules (e.g. src/Core/Support) keep being compiled.
+file(GLOB_RECURSE APORIA_CORE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Core/*.cpp")
 list(APPEND APORIA_SOURCES ${APORIA_CORE_SOURCES})
 

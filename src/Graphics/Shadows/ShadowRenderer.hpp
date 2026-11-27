@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Aporia/Graphics/Graphics.hpp"
-#include "../Meshes/MeshRenderer.hpp"
+#include "../Meshes/Render/MeshRenderer.hpp"
 
 #include <cstdint>
 #include <unordered_map>

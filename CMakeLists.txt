@@ -15,6 +15,10 @@ add_library(Aporia::Engine ALIAS AporiaEngine)
 target_compile_features(AporiaEngine PUBLIC cxx_std_20)
 target_include_directories(AporiaEngine
     PUBLIC
+        # Public API headers live in the api branch and are mirrored here by
+        # sync-api.bat. The local include/ stays as a fallback for checkouts
+        # that do not have extern/Aporia-API populated yet.
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extern/Aporia-API/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE

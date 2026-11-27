@@ -1,4 +1,4 @@
-#include "Graphics/GraphicsImpl.hpp"
+#include "Graphics/Graphics.hpp"
 
 #include <string>
 #include <vector>

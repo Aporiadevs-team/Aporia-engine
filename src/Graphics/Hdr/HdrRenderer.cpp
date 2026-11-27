@@ -1,5 +1,5 @@
 #include "HdrRenderer.hpp"
-#include "../UI/RectRenderer.hpp"
+#include "../UI/Rects/RectRenderer.hpp"
 
 #include <array>
 

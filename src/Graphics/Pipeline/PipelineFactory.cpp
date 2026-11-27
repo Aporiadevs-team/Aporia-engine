@@ -9,8 +9,8 @@
 
 #include "PipelineFactory.hpp"
 
-#include "Graphics/Meshes/MeshRenderer.hpp"
-#include "Graphics/UI/RectRenderer.hpp"
+#include "Graphics/Meshes/Render/MeshRenderer.hpp"
+#include "Graphics/UI/Rects/RectRenderer.hpp"
 
 #include <array>
 #include <cstddef>
@@ -31,15 +31,15 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
         return module != VK_NULL_HANDLE;
     };
 
-    if (!loadShader("triangle.vert", out.vertexShader) ||
-        !loadShader("triangle.frag", out.fragmentShader)) {
+    if (!loadShader("texture.vert", out.vertexShader) ||
+        !loadShader("texture.frag", out.fragmentShader)) {
         return false;
     }
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &context.triangleLayout;
+    pipelineLayoutInfo.pSetLayouts = &context.textureSamplerLayout;
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &out.pipelineLayout) != VK_SUCCESS) {
         error = "vkCreatePipelineLayout failed";
         return false;
@@ -141,7 +141,7 @@ bool createPipelines(const PipelineContext& context, PipelineSet& out, std::stri
     // Set 0 is the scene. Per-item albedo textures live in set 1, unless the
     // experimental multi-layer material already owns set 1 — then set 2.
     const VkDescriptorSetLayout itemTextureLayout =
-        context.textureLayout != VK_NULL_HANDLE ? context.textureLayout : context.triangleLayout;
+        context.textureLayout != VK_NULL_HANDLE ? context.textureLayout : context.textureSamplerLayout;
 #if defined(APORIA_EXPERIMENTAL)
     VkDescriptorSetLayout meshSetLayouts[3] = {context.sceneLayout, context.materialLayout, itemTextureLayout};
     meshLayoutInfo.setLayoutCount = 3;
