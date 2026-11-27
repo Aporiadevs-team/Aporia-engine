@@ -3,7 +3,6 @@
 #include "Graphics/GraphicsImpl.hpp"
 
 #include <algorithm>
-#include <string>
 
 namespace Aporia {
 
@@ -34,7 +33,6 @@ void Graphics::Impl::applyQualityPreset(Aporia::GraphicsQuality quality) noexcep
     reflectionsEnabled = parameters.reflections;
     reflectionScale = parameters.reflectionScale;
     shadowStrength = parameters.shadowStrength;
-    textureStore.setTextureScalePercent(parameters.textureScalePercent);
     maxLights = parameters.maxLights;
     shadowConfig.mapSize = parameters.shadowMapSize;
     shadowConfig.cascadeCount = 1;
@@ -45,78 +43,6 @@ void Graphics::Impl::applyQualityPreset(Aporia::GraphicsQuality quality) noexcep
     shadowConfig.contactShadows = quality != Aporia::GraphicsQuality::Low;
     shadowConfig.contactDistance = quality == Aporia::GraphicsQuality::High ? 3.0f : 1.5f;
     activeQuality = quality;
-    hdrRenderer.setQuality(quality);
-    shadowRenderer.setConfig(shadowConfig);
-}
-
-bool Graphics::Impl::ensureDepthForExtent(std::uint32_t width, std::uint32_t height) {
-    std::string error;
-    if (!QualityTargets::ensureDepthForExtent(depthFormat, width, height, error)) {
-        setError(error);
-        return false;
-    }
-    return true;
-}
-
-bool Graphics::Impl::createHdrRenderPass() {
-    std::string error;
-    if (!QualityTargets::createHdrRenderPass(depthFormat, error)) {
-        setError(error);
-        return false;
-    }
-    return true;
-}
-
-bool Graphics::Impl::createShadowResources() {
-    std::string error;
-    if (!QualityTargets::createShadowResources(depthFormat, shadowMapSize, error)) {
-        setError(error);
-        return false;
-    }
-    return true;
-}
-
-bool Graphics::Impl::rebuildQualityTargets() {
-    graphics_internal::QualityTargets::RebuildContext context;
-    context.mainRenderPass = renderPass;
-    context.colorFormat = colorFormat;
-    context.depthFormat = depthFormat;
-    context.headless = headless;
-    context.swapchainExtent = swapchainExtent;
-    context.renderWidth = renderWidth;
-    context.renderHeight = renderHeight;
-    context.hdrEnabled = hdrEnabled;
-    context.reflectionsEnabled = reflectionsEnabled;
-    context.reflectionScale = reflectionScale;
-    context.shadowMapSize = shadowMapSize;
-    context.antiAliasing = antiAliasing;
-    context.sceneUniformSize = sizeof(SceneUniforms);
-    context.scene = &scene;
-    context.textures = &textureStore;
-    context.taa = &taa;
-    context.tonemapDescriptorLayout = pipelines.tonemapDescriptorLayout;
-    context.tonemapDescriptorPool = pipelines.tonemapDescriptorPool;
-    context.tonemapVertexShader = pipelines.tonemapVertexShader;
-    context.taaFragmentShader = pipelines.taaFragmentShader;
-#if defined(APORIA_EXPERIMENTAL)
-    context.froxelView = volumetric.view();
-    context.froxelSampler = volumetric.sampler();
-#endif
-    std::string error;
-    if (!QualityTargets::rebuild(context, error)) {
-        setError(error);
-        return false;
-    }
-#if defined(APORIA_EXPERIMENTAL)
-    // Volumetric::rebuild above recreated the shadow map, so re-point the inject
-    // pass at the new depth view before the next dispatch.
-    volumetric.bindShadow(shadow.view, shadow.sampler);
-#endif
-    return true;
-}
-
-void Graphics::Impl::destroyQualityTargets() noexcept {
-    destroyTargets(device, pipelines.tonemapDescriptorPool, taa, scene);
 }
 
 bool Graphics::setQuality(GraphicsQuality quality) {
@@ -131,10 +57,8 @@ bool Graphics::setQuality(GraphicsQuality quality) {
         return true;
     }
     impl_->applyQualityPreset(quality);
-    if (!impl_->rebuildQualityTargets()) {
-        return false;
-    }
-    return impl_->rebuildMeshPipelines();
+    impl_->directX->setQuality(quality);
+    return true;
 }
 
 void Graphics::setShadowConfig(const ShadowConfig& config) {
@@ -147,16 +71,47 @@ void Graphics::setShadowConfig(const ShadowConfig& config) {
     impl_->shadowConfig.passCount = std::max(1u, config.passCount);
     impl_->shadowConfig.pcfRadius = std::min(8u, config.pcfRadius);
     impl_->shadowMapSize = impl_->shadowConfig.mapSize;
-    impl_->shadowTaps = static_cast<int>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
+    impl_->shadowTaps = static_cast<std::uint32_t>((impl_->shadowConfig.pcfRadius * 2 + 1) * (impl_->shadowConfig.pcfRadius * 2 + 1));
     impl_->shadowStrength = impl_->shadowConfig.strength;
     impl_->shadowsEnabled = impl_->shadowConfig.enabled;
-    if (initialized()) {
-        impl_->rebuildQualityTargets();
+    if (impl_->directX) {
+        impl_->directX->setShadowConfig(impl_->shadowConfig);
     }
 }
 
 ShadowConfig Graphics::shadowConfig() const noexcept {
-    return impl_ ? impl_->shadowConfig : ShadowConfig{};
+    if (!impl_) {
+        return ShadowConfig{};
+    }
+    if (impl_->directX) {
+        return impl_->directX->shadowConfig();
+    }
+    return impl_->shadowConfig;
+}
+
+void Graphics::setShadowDistance(float metres) {
+    if (!impl_) {
+        return;
+    }
+    // The extent is a half size around the camera, so it has to stay positive
+    // and small enough that the shadow map keeps a usable texel density.
+    const float clamped = std::clamp(metres, 1.0f, 500.0f);
+    impl_->shadowConfig.distance = clamped;
+    impl_->shadowExtent = clamped;
+    if (impl_->directX) {
+        impl_->directX->setShadowExtent(clamped);
+    }
+}
+
+float Graphics::shadowDistance() const noexcept {
+    return impl_ ? impl_->shadowExtent : 0.0f;
+}
+
+void Graphics::scaleShadowDistance(float factor) {
+    if (!impl_ || factor <= 0.0f) {
+        return;
+    }
+    setShadowDistance(impl_->shadowExtent * factor);
 }
 
 void Graphics::enablePlayerUltraShadows(bool enabled) noexcept {
@@ -164,7 +119,6 @@ void Graphics::enablePlayerUltraShadows(bool enabled) noexcept {
         impl_->playerUltraShadows = enabled;
     }
 }
-
 bool Graphics::playerUltraShadowsEnabled() const noexcept {
     return impl_ != nullptr && impl_->playerUltraShadows;
 }

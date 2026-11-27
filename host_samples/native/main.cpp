@@ -81,7 +81,7 @@ int main() {
 
     Aporia::CameraState camera;
     const Aporia::Mat4 view = Aporia::Mat4::lookAt({6.0, -6.0, 4.0}, {0.0, 0.0, 1.0}, {0.0, 0.0, 1.0});
-    const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(1.0, 1280.0 / 720.0, 0.1, 100.0);
+    const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(1.0, 1280.0 / 720.0, 0.1, 100.0);
     std::memcpy(camera.viewMatrix, &view, sizeof(view));
     std::memcpy(camera.projectionMatrix, &projection, sizeof(projection));
     camera.position[0] = 6.0;

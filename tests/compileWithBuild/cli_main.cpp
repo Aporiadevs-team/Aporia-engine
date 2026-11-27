@@ -574,13 +574,13 @@ int main() {
     check(std::abs(lookCenter.x) < 1.0e-5 && std::abs(lookCenter.y) < 1.0e-5, "lookAt must center the target");
     check(std::abs(lookCenter.z + 5.0) < 1.0e-5, "lookAt must place target at view depth 5 (negative view z)");
 
-    const Aporia::Mat4 perspective = Aporia::Mat4::perspectiveVulkan(1.0, 1.0, 0.1, 10.0);
+    const Aporia::Mat4 perspective = Aporia::Mat4::perspectiveD3D(1.0, 1.0, 0.1, 10.0);
     const Aporia::Vec3 perspectiveNear = perspective.transformPoint({0.0, 0.0, -0.1});
     const Aporia::Vec3 perspectiveFar = perspective.transformPoint({0.0, 0.0, -10.0});
     check(std::abs(perspectiveNear.z) < 1.0e-4, "perspective near plane must map to depth 0");
     check(std::abs(perspectiveFar.z - 1.0) < 1.0e-4, "perspective far plane must map to depth 1");
 
-    const Aporia::Mat4 ortho = Aporia::Mat4::orthographicVulkan(2.0, 2.0, 0.1, 10.0);
+    const Aporia::Mat4 ortho = Aporia::Mat4::orthographicD3D(2.0, 2.0, 0.1, 10.0);
     const Aporia::Vec3 orthoCenter = ortho.transformPoint({0.0, 0.0, -5.0});
     check(std::abs(orthoCenter.x) < 1.0e-5 && std::abs(orthoCenter.y) < 1.0e-5, "ortho must keep center");
 

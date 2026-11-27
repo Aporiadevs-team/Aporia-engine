@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
         Aporia::UiDrawList ui;
         ui.font = font;
         ui.textRuns.reserve(180);
-        std::uint32_t glyphBudget = 1800;
+        std::uint32_t glyphBudget = 18000;
         float y = 40.0f;
         std::size_t wordIndex = (frames * 37u) % words.size();
         while (glyphBudget > 0) {

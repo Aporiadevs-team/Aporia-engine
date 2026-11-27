@@ -8,7 +8,7 @@
 
 namespace Aporia {
 
-// Column-major 4x4 matrix matching Vulkan memory layout:
+// Column-major 4x4 matrix, the layout Direct3D expects:
 // storage[column][row], multiplication left-to-right applies rightmost first.
 struct Mat4 {
     float m[4][4] = {};
@@ -71,8 +71,22 @@ struct Mat4 {
     }
 
     [[nodiscard]] static Mat4 lookAt(const Vec3& eye, const Vec3& target, const Vec3& up) noexcept {
-        const Vec3 forward = (target - eye).normalized();
-        const Vec3 right = cross(forward, up).normalized();
+        Vec3 forward = (target - eye).normalized();
+        if (forward.lengthSquared() <= 0.0) {
+            forward = {0.0, 1.0, 0.0};
+        }
+        Vec3 right = cross(forward, up).normalized();
+        if (right.lengthSquared() <= 0.0) {
+            // Looking straight along the up axis: the cross product vanishes
+            // and the whole basis would collapse. Any axis perpendicular to
+            // the view keeps the matrix invertible, so the camera keeps
+            // working instead of turning the scene into a singularity.
+            const Vec3 fallback = std::abs(forward.z) < 0.9 ? Vec3{0.0, 0.0, 1.0} : Vec3{1.0, 0.0, 0.0};
+            right = cross(forward, fallback).normalized();
+            if (right.lengthSquared() <= 0.0) {
+                right = {1.0, 0.0, 0.0};
+            }
+        }
         const Vec3 correctedUp = cross(right, forward);
 
         Mat4 result;
@@ -91,14 +105,14 @@ struct Mat4 {
         return result;
     }
 
-    // Vulkan clip space: right-handed view, +Y down in NDC, depth in [0, 1].
-    [[nodiscard]] static Mat4 perspectiveVulkan(double verticalFovRadians, double aspect, double nearZ, double farZ) noexcept {
+    // Direct3D clip space: right-handed view, +Y up in NDC, depth in [0, 1].
+    [[nodiscard]] static Mat4 perspectiveD3D(double verticalFovRadians, double aspect, double nearZ, double farZ) noexcept {
         const float focalLength = static_cast<float>(1.0 / std::tan(verticalFovRadians * 0.5));
         const float depth = static_cast<float>(1.0 / (nearZ - farZ));
 
         Mat4 result;
         result.m[0][0] = focalLength / static_cast<float>(aspect);
-        result.m[1][1] = -focalLength;
+        result.m[1][1] = focalLength;
         result.m[2][2] = static_cast<float>(farZ * depth);
         result.m[2][3] = -1.0f;
         result.m[3][2] = static_cast<float>(nearZ * farZ * depth);
@@ -106,13 +120,13 @@ struct Mat4 {
         return result;
     }
 
-    // Vulkan clip space orthographic projection with depth in [0, 1].
-    [[nodiscard]] static Mat4 orthographicVulkan(double width, double height, double nearZ, double farZ) noexcept {
+    // Direct3D clip space orthographic projection with depth in [0, 1].
+    [[nodiscard]] static Mat4 orthographicD3D(double width, double height, double nearZ, double farZ) noexcept {
         const float depth = static_cast<float>(1.0 / (nearZ - farZ));
 
         Mat4 result;
         result.m[0][0] = static_cast<float>(2.0 / width);
-        result.m[1][1] = static_cast<float>(-2.0 / height);
+        result.m[1][1] = static_cast<float>(2.0 / height);
         result.m[2][2] = static_cast<float>(depth);
         result.m[3][2] = static_cast<float>(nearZ * depth);
         return result;

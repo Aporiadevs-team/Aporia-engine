@@ -12,12 +12,12 @@ TextureHandle Graphics::createTexture2D(const TextureDesc& description) {
         impl_->setError("Graphics is not initialized");
         return invalidTextureHandle;
     }
-    std::string error;
-    const TextureHandle handle = impl_->textureStore.create(description, impl_->scene, error);
-    if (!handle.valid()) {
-        impl_->setError(error);
+    const std::uint64_t id = impl_->directX->createTexture(description);
+    if (id == 0) {
+        impl_->setError("Direct3D texture creation failed");
+        return invalidTextureHandle;
     }
-    return handle;
+    return TextureHandle(id);
 }
 
 bool Graphics::updateTexture2D(
@@ -31,9 +31,8 @@ bool Graphics::updateTexture2D(
         impl_->setError("Graphics is not initialized");
         return false;
     }
-    std::string error;
-    if (!impl_->textureStore.update(handle, pixels, dataSize, error)) {
-        impl_->setError(error);
+    if (!impl_->directX->updateTexture(handle.value(), pixels, dataSize)) {
+        impl_->setError("Direct3D texture update failed");
         return false;
     }
     return true;
@@ -47,17 +46,8 @@ bool Graphics::setTexture2D(TextureHandle handle) noexcept {
         impl_->lastError = "Graphics is not initialized";
         return false;
     }
-    if (impl_->device == VK_NULL_HANDLE || vkDeviceWaitIdle(impl_->device) != VK_SUCCESS) {
-        impl_->lastError = "vkDeviceWaitIdle(texture bind) failed";
-        return false;
-    }
-    std::string error;
-    // Every ring slot has to sample the new texture: the frame that renders
-    // next may use any of them, so binding only currentFrameSlot left the
-    // other slots pointing at the previous texture (one-frame flicker, and a
-    // dangling view after a destroy).
-    if (!impl_->textureStore.bindAll(handle, impl_->scene, error)) {
-        impl_->lastError = error;
+    if (!impl_->directX->setFrameTexture(handle.value())) {
+        impl_->lastError = "Direct3D texture bind failed";
         return false;
     }
     return true;
@@ -71,11 +61,7 @@ void Graphics::destroyTexture2D(TextureHandle handle) noexcept {
         impl_->lastError = "Graphics is not initialized";
         return;
     }
-    std::string error;
-    impl_->textureStore.destroy(handle, impl_->scene, error);
-    if (!error.empty()) {
-        impl_->lastError = error;
-    }
+    impl_->directX->destroyTexture(handle.value());
 }
 
 } // namespace Aporia

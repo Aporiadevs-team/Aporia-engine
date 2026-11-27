@@ -16,30 +16,36 @@ MeshHandle Graphics::createLodMesh(
         impl_->setError("Graphics is not initialized");
         return invalidMeshHandle;
     }
-    std::string error;
-    const MeshHandle handle = impl_->meshStore.createLod(levels, maxDistances, boundary, error);
-    if (!handle.valid()) {
-        impl_->setError(error);
+    if (!impl_ || !impl_->directX) {
+        return invalidMeshHandle;
     }
-    return handle;
+    const std::uint64_t id = impl_->directX->createLodMesh(levels, maxDistances, boundary);
+    if (id == 0) {
+        impl_->setError("Direct3D LOD group creation failed");
+        return invalidMeshHandle;
+    }
+    return MeshHandle(id);
 }
 
 void Graphics::destroyLodMesh(MeshHandle handle) noexcept {
-    if (!impl_) {
+    if (!impl_ || !impl_->directX) {
         return;
     }
-    impl_->meshStore.destroyLod(handle);
+    impl_->directX->destroyLodMesh(handle.value());
 }
 
 bool Graphics::lodMeshValid(MeshHandle handle) const noexcept {
-    return impl_ != nullptr && impl_->meshStore.lodValid(handle);
+    if (!impl_ || !impl_->directX) {
+        return false;
+    }
+    return impl_->directX->lodMeshValid(handle.value());
 }
 
 std::uint32_t Graphics::lodLevelCount(MeshHandle handle) const noexcept {
-    if (!impl_) {
+    if (!impl_ || !impl_->directX) {
         return 0;
     }
-    return impl_->meshStore.lodLevelCount(handle);
+    return impl_->directX->lodLevelCount(handle.value());
 }
 
 } // namespace Aporia

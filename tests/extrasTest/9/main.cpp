@@ -675,7 +675,7 @@ int main(int argc, char** argv) {
             carPosition.z + vertical};
         const Aporia::Vec3 target{carPosition.x, carPosition.y, carPosition.z + 0.7};
         const Aporia::Mat4 view = Aporia::Mat4::lookAt(eye, target, {0.0, 0.0, 1.0});
-        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(
+        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(
             1.05, 1280.0 / 720.0, 0.1, 400.0);
         Aporia::CameraState camera;
         std::memcpy(camera.viewMatrix, &view, sizeof(view));

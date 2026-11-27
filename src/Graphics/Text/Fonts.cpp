@@ -15,13 +15,12 @@ FontHandle Graphics::createFontFromTtf(const std::string& ttfPath, float pixelSi
         return invalidFontHandle;
     }
     std::string error;
-    const FontHandle handle = impl_->fontStore.createFromTtf(
-        ttfPath, pixelSize, impl_->textureStore, impl_->scene, error);
-    
-    if (!handle.valid()) {
-        impl_->setError(error);
+    const std::uint64_t id = impl_->directX->createFontFromTtf(ttfPath, pixelSize, error);
+    if (id == 0) {
+        impl_->setError(error.empty() ? "Direct3D font creation failed" : error);
+        return invalidFontHandle;
     }
-    return handle;
+    return FontHandle(id);
 }
 
 FontHandle Graphics::createFontFromMsdf(const std::string& jsonPath, const std::string& pngPath) {
@@ -33,34 +32,35 @@ FontHandle Graphics::createFontFromMsdf(const std::string& jsonPath, const std::
         return invalidFontHandle;
     }
     std::string error;
-    const FontHandle handle = impl_->fontStore.createFromMsdf(
-        jsonPath, pngPath, impl_->textureStore, impl_->scene, error);
-    if (!handle.valid()) {
-        impl_->setError(error);
+    const std::uint64_t id = impl_->directX->createFontFromMsdf(jsonPath, pngPath, error);
+    if (id == 0) {
+        impl_->setError(error.empty() ? "Direct3D font creation failed" : error);
+        return invalidFontHandle;
     }
-    return handle;
+    return FontHandle(id);
 }
 
 void Graphics::destroyFont(FontHandle handle) noexcept {
     if (!impl_ || !handle.valid()) {
         return;
     }
-    impl_->fontStore.destroy(handle, impl_->textureStore, impl_->scene);
+    if (impl_->directX) {
+        impl_->directX->destroyFont(handle.value());
+    }
 }
 
 bool Graphics::fontValid(FontHandle handle) const noexcept {
-    return impl_ != nullptr && impl_->fontStore.valid(handle);
+    if (!impl_ || !impl_->directX) {
+        return false;
+    }
+    return impl_->directX->fontValid(handle.value());
 }
 
 float Graphics::measureText(FontHandle handle, std::string_view text, float size) const {
-    if (impl_ == nullptr || !handle.valid()) {
+    if (impl_ == nullptr || !impl_->directX || !handle.valid()) {
         return 0.0f;
     }
-    const graphics_internal::FontStore::Resource* resource = impl_->fontStore.find(handle);
-    if (resource == nullptr) {
-        return 0.0f;
-    }
-    return impl_->textRenderer.measureText(resource->atlas, text, size);
+    return impl_->directX->measureText(handle.value(), text, size);
 }
 
 } // namespace Aporia

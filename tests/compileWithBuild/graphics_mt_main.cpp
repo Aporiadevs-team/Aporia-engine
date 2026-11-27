@@ -2,7 +2,7 @@
 // vs multithreaded frame recording (the experimental shadow pass on a worker).
 //
 // Reports total time, average frame time (latency), p50/p95 frame time and FPS
-// for both modes, then verifies both produce identical pixels and zero Vulkan
+// for both modes, then verifies both produce identical pixels and zero
 // validation messages.
 
 #define WIN32_LEAN_AND_MEAN

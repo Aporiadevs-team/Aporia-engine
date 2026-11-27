@@ -70,7 +70,7 @@ bool headlessSkyCheck() {
     const auto renderSky = [&](const Aporia::Vec3& eye, const Aporia::Vec3& target, std::vector<std::uint8_t>& out) {
         Aporia::CameraState camera;
         const Aporia::Mat4 view = Aporia::Mat4::lookAt(eye, target, {0.0, 0.0, 1.0});
-        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(0.9, 1.0, 0.1, 1000.0);
+        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(0.9, 1.0, 0.1, 1000.0);
         std::memcpy(camera.viewMatrix, &view, sizeof(view));
         std::memcpy(camera.projectionMatrix, &projection, sizeof(projection));
         camera.position[0] = eye.x;
@@ -171,14 +171,16 @@ int main(int argc, char** argv) {
         return 1;
     }
     game.graphics().setVsync(false);
-    // Sun follows the clock: start at morning, one day per two real minutes.
+    // The sun follows the clock, and the clock runs at real time by default so
+    // the scene stays put while looking around. O/P speed the day up, U/I trim
+    // its length.
     game.graphics().setTimeOfDay(startTimeHours);
-    game.graphics().setGameClock(2.0f, 1.0f);
+    game.graphics().setGameClock(1440.0f, 1.0f); // one real day per day
     game.graphics().setTimeDrivenSun(true);
     int demoMonth = 6;
     game.graphics().setDate(demoMonth, 21); // summer solstice by default
-    double dayLengthBias = 0.0;  // U/I: day-length trim in hours
-    float gameDayMinutes = 2.0f; // O/P: real minutes per in-game day
+    double dayLengthBias = 0.0;   // U/I: day-length trim in hours
+    float gameDayMinutes = 1440.0f; // O/P: real minutes per in-game day
 
     const Aporia::MeshHandle boxMesh = game.graphics().createMesh(Aporia::apr::makeBoxMesh(0.5f, 0.5f, 0.5f));
     const Aporia::FontHandle font = game.graphics().createFontFromTtf(firstExistingFont(), 44.0f);
@@ -216,7 +218,7 @@ int main(int argc, char** argv) {
 
     double position[3] = {0.0, -8.0, 1.7};
     double yaw = 3.14159265 * 0.5; // look toward +Y
-    double pitch = -0.05;
+    double pitch = 0.10;           // slightly up: horizon and sky are both in view
     const double sensitivity = 0.0022;
     bool lookActive = false;
     bool running = true;
@@ -249,8 +251,14 @@ int main(int argc, char** argv) {
                     case SDLK_4: demoMonth = 9; break;  // autumn
                     case SDLK_U: dayLengthBias += 1.0; break;  // day +1h
                     case SDLK_I: dayLengthBias -= 1.0; break;  // day -1h
-                    case SDLK_O: gameDayMinutes += 1.0f; break; // game day +1 min
-                    case SDLK_P: gameDayMinutes = std::max(1.0f, gameDayMinutes - 1.0f); break;
+                    case SDLK_O: gameDayMinutes += 60.0f; break; // game day slower
+                    case SDLK_P: gameDayMinutes = std::max(1.0f, gameDayMinutes - 60.0f); break;
+                    case SDLK_LEFTBRACKET:  // shadow distance -10%
+                        game.graphics().scaleShadowDistance(0.9f);
+                        break;
+                    case SDLK_RIGHTBRACKET: // shadow distance +10%
+                        game.graphics().scaleShadowDistance(1.1f);
+                        break;
                     default: break;
                 }
                 if (event.key.key == SDLK_1 || event.key.key == SDLK_2 ||
@@ -302,7 +310,7 @@ int main(int argc, char** argv) {
         int windowHeight = kWindowHeight;
         SDL_GetWindowSize(window, &windowWidth, &windowHeight);
         const double aspect = windowHeight > 0 ? static_cast<double>(windowWidth) / static_cast<double>(windowHeight) : 1.0;
-        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(0.9, aspect, 0.1, 20000.0);
+        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(0.9, aspect, 0.1, 20000.0);
         Aporia::CameraState camera;
         std::memcpy(camera.viewMatrix, &view, sizeof(view));
         std::memcpy(camera.projectionMatrix, &projection, sizeof(projection));
@@ -329,12 +337,13 @@ int main(int argc, char** argv) {
         const double rise = game.graphics().sunriseHour();
         const double set = game.graphics().sunsetHour();
         std::snprintf(line, sizeof(line),
-                      "FLAT WORLD  pos %.1f %.1f %.1f  time %02d:%02d  sun %02d:%02d-%02d:%02d  day%+.0fh gday%.0fm  FPS %d",
+                      "FLAT WORLD  pos %.1f %.1f %.1f  time %02d:%02d  sun %02d:%02d-%02d:%02d  day%+.0fh gday%.0fm  shadows %.0fm  FPS %d",
                       position[0], position[1], position[2],
                       static_cast<int>(tod), static_cast<int>((tod - static_cast<int>(tod)) * 60.0),
                       static_cast<int>(rise), static_cast<int>((rise - static_cast<int>(rise)) * 60.0),
                       static_cast<int>(set), static_cast<int>((set - static_cast<int>(set)) * 60.0),
-                      dayLengthBias, gameDayMinutes, static_cast<int>(smoothedFps));
+                      dayLengthBias, gameDayMinutes, static_cast<double>(game.graphics().shadowDistance()),
+                      static_cast<int>(smoothedFps));
         Aporia::UiTextRun run;
         run.text = line;
         run.x = 14.0f;
@@ -343,7 +352,7 @@ int main(int argc, char** argv) {
         run.color = {0.9f, 0.95f, 1.0f, 1.0f};
         ui.textRuns.push_back(run);
         Aporia::UiTextRun hint;
-        hint.text = "HOLD RMB look (up = sky)  WASD move  Space/Ctrl up-down  1/2/3/4 season  U/I day +/-1h  O/P gameday +/-1m  ESC";
+        hint.text = "HOLD RMB look (up = sky)  WASD move  Space/Ctrl up-down  1/2/3/4 season  U/I day +/-1h  O/P day speed  [/] shadow range  ESC";
         hint.x = 14.0f;
         hint.y = 34.0f;
         hint.size = 14.0f;

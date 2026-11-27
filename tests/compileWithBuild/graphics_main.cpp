@@ -26,7 +26,7 @@ int main() {
     Aporia::GraphicsConfig config;
     config.enableValidation = true;
 
-    check(game.initGraphics({}, config), "headless Vulkan initialization must succeed");
+    check(game.initGraphics({}, config), "headless Direct3D initialization must succeed");
     if (failures != 0) {
         std::cerr << game.graphics().lastError() << '\n';
         return 1;
@@ -57,16 +57,17 @@ int main() {
     check(textureStats.textureUploadCount >= 3, "texture uploads must be reported");
 
     for (int frame = 0; frame < 8; ++frame) {
-        check(game.graphics().renderFrame(), "headless Vulkan frame must submit successfully");
+        check(game.graphics().renderFrame(), "headless Direct3D frame must submit successfully");
     }
 
     const Aporia::GraphicsStats stats = game.graphics().stats();
     check(stats.frameCount == 8, "graphics stats must count submitted frames");
-    check(stats.apiVersion >= 0x00401000, "Vulkan API version must be reported");
-    check(!stats.deviceName.empty(), "Vulkan device name must be reported");
-    check(stats.memoryTypeCount > 0, "Vulkan memory types must be reported");
+    check(stats.apiVersion >= 12, "Direct3D 12 API version must be reported");
+    check(!stats.deviceName.empty(), "Direct3D device name must be reported");
+    check(stats.surfaceWidth == 64 && stats.surfaceHeight == 64,
+          "the headless target size must be reported");
     if (stats.validationEnabled) {
-        std::cerr << "Vulkan validation messages: " << stats.validationMessageCount << '\n';
+        std::cerr << "Direct3D validation messages: " << stats.validationMessageCount << '\n';
     }
 
     game.graphics().destroyTexture2D(texture);
@@ -129,7 +130,7 @@ int main() {
     {
         Aporia::CameraState edgeCamera;
         const Aporia::Mat4 view = Aporia::Mat4::lookAt({0.0, -4.0, 1.2}, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
-        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(0.8, 1.0, 0.1, 100.0);
+        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(0.8, 1.0, 0.1, 100.0);
         std::memcpy(edgeCamera.viewMatrix, &view, sizeof(view));
         std::memcpy(edgeCamera.projectionMatrix, &projection, sizeof(projection));
         edgeCamera.position[0] = 0.0;
@@ -232,8 +233,8 @@ int main() {
     check(!game.graphics().initialized(), "graphics must report shutdown state");
 
     for (int cycle = 0; cycle < 3; ++cycle) {
-        check(game.initGraphics({}, config), "repeated headless Vulkan initialization must succeed");
-        check(game.graphics().renderHeadlessFrame(), "repeated headless Vulkan frame must succeed");
+        check(game.initGraphics({}, config), "repeated headless Direct3D initialization must succeed");
+        check(game.graphics().renderHeadlessFrame(), "repeated headless Direct3D frame must succeed");
         game.shutdownGraphics();
     }
 

@@ -11,29 +11,33 @@ MaterialHandle Graphics::createMaterial(const MaterialDesc& description) {
         return invalidMaterialHandle;
     }
     std::string error;
-    const MaterialHandle handle = impl_->materialStore.create(description, impl_->textureStore, error);
-    if (!handle.valid()) {
-        impl_->setError(error);
+    const std::uint64_t id = impl_->directX->createMaterial(description);
+    if (id == 0) {
+        impl_->setError("Direct3D material creation failed");
+        return invalidMaterialHandle;
     }
-    return handle;
+    return MaterialHandle(id);
 }
 
 bool Graphics::updateMaterial(MaterialHandle handle, const MaterialDesc& description) {
     if (!impl_ || !initialized()) {
         return false;
     }
-    return impl_->materialStore.update(handle, description, impl_->textureStore);
+    return impl_->directX->updateMaterial(handle.value(), description);
 }
 
 void Graphics::destroyMaterial(MaterialHandle handle) noexcept {
-    if (!impl_) {
+    if (!impl_ || !impl_->directX) {
         return;
     }
-    impl_->materialStore.destroy(handle);
+    impl_->directX->destroyMaterial(handle.value());
 }
 
 bool Graphics::materialValid(MaterialHandle handle) const noexcept {
-    return impl_ != nullptr && impl_->materialStore.valid(handle);
+    if (!impl_ || !impl_->directX) {
+        return false;
+    }
+    return impl_->directX->materialValid(handle.value());
 }
 #endif
 

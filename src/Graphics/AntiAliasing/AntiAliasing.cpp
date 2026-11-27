@@ -19,15 +19,17 @@ void Graphics::setAntiAliasing(AntiAliasingMode mode) {
         return;
     }
     impl_->antiAliasing = static_cast<std::uint32_t>(mode);
-    impl_->hdrRenderer.setAntiAliasing(mode);
-    if (initialized()) {
-        impl_->rebuildQualityTargets();
+    if (impl_->directX) {
+        impl_->directX->setAntiAliasing(mode);
     }
 }
 
 AntiAliasingMode Graphics::antiAliasing() const noexcept {
     if (!impl_) {
         return AntiAliasingMode::None;
+    }
+    if (impl_->directX) {
+        return impl_->directX->antiAliasing();
     }
     return static_cast<AntiAliasingMode>(impl_->antiAliasing);
 }
@@ -37,10 +39,19 @@ void Graphics::setAntiAliasingStrength(float strength) noexcept {
         return;
     }
     impl_->antiAliasingStrength = graphics_internal::clampAntiAliasingStrength(strength);
+    if (impl_->directX) {
+        impl_->directX->setAntiAliasingStrength(impl_->antiAliasingStrength);
+    }
 }
 
 float Graphics::antiAliasingStrength() const noexcept {
-    return impl_ != nullptr ? impl_->antiAliasingStrength : 0.0f;
+    if (!impl_) {
+        return 0.0f;
+    }
+    if (impl_->directX) {
+        return impl_->directX->antiAliasingStrength();
+    }
+    return impl_->antiAliasingStrength;
 }
 
 } // namespace Aporia

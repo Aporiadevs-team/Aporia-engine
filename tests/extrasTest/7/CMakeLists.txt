@@ -19,5 +19,6 @@ add_executable(AporiaRenderTest7 main.cpp)
 target_link_libraries(AporiaRenderTest7 PRIVATE Aporia::Engine user32)
 set_target_properties(AporiaRenderTest7 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    LINK_FLAGS "/SUBSYSTEM:CONSOLE"
 )
 aporia_stage_engine_runtime(AporiaRenderTest7)

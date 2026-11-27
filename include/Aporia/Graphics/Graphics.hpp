@@ -146,8 +146,8 @@ struct MaterialDesc {
 };
 #endif
 
-// View parameters for one frame. Matrices are column-major float32 in Vulkan
-// clip space (see Mat4::perspectiveVulkan); copy from Mat4 with memcpy.
+// View parameters for one frame. Matrices are column-major float32 in
+// Direct3D clip space (see Mat4::perspectiveD3D); copy from Mat4 with memcpy.
 struct CameraState {
     float viewMatrix[16] = {};
     float projectionMatrix[16] = {};
@@ -446,6 +446,14 @@ public:
     bool setQuality(GraphicsQuality quality);
     void setShadowConfig(const ShadowConfig& config);
     [[nodiscard]] ShadowConfig shadowConfig() const noexcept;
+    // Shadow render distance: how far from the camera the sun's orthographic
+    // shadow box reaches. A larger box covers more of the world but spreads
+    // the same map texels over more metres, so shadows get coarser.
+    void setShadowDistance(float metres);
+    [[nodiscard]] float shadowDistance() const noexcept;
+    // Nudges the distance by a relative step (0.1 = +10%). Handy for a host
+    // that binds it to a pair of keys.
+    void scaleShadowDistance(float factor);
     void enablePlayerUltraShadows(bool enabled) noexcept;
     [[nodiscard]] bool playerUltraShadowsEnabled() const noexcept;
 
@@ -474,7 +482,7 @@ public:
     // Same as render() with scene environment (sun, mirror plane).
     bool render(const CameraState& camera, const EnvironmentState& environment, const std::vector<RenderItem>& items);
 
-    // Vulkan UI draw list. The backend owns the pass; callers only describe
+    // UI draw list. The backend owns the pass; callers only describe
     // rectangles and text runs, so no GDI/OS drawing is involved.
     void setUiDrawList(UiDrawList drawList);
     void clearUiDrawList() noexcept;

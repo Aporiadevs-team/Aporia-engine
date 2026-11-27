@@ -22,6 +22,14 @@ endif()
 if(APORIA_BUILD_TESTS)
     enable_testing()
 
+    # Direct3D 12 backend smoke test: drives the abstract backend contract
+    # only (no engine renderer), so it runs even without the graphics module.
+    if(APORIA_ENABLE_D3D12 AND WIN32)
+        aporia_add_host_executable(AporiaD3D12Cli tests/d3d12/d3d12_main.cpp)
+        add_test(NAME AporiaD3D12Cli COMMAND AporiaD3D12Cli)
+        set_tests_properties(AporiaD3D12Cli PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endif()
+
     # compileWithBuild — core tests compiled alongside the engine
     aporia_add_host_executable(AporiaCli tests/compileWithBuild/cli_main.cpp)
     add_test(NAME AporiaCli COMMAND AporiaCli)
@@ -29,6 +37,9 @@ if(APORIA_BUILD_TESTS)
     if(APORIA_ENABLE_GRAPHICS)
         aporia_add_host_executable(AporiaGraphicsCli tests/compileWithBuild/graphics_main.cpp)
         add_test(NAME AporiaGraphicsCli COMMAND AporiaGraphicsCli)
+
+        # TEMPORARY probe: isolates the render pass that hangs the GPU.
+        aporia_add_host_executable(AporiaProbe tests/compileWithBuild/probe_main.cpp)
 
         aporia_add_host_executable(AporiaGraphicsStress tests/compileWithBuild/graphics_main_stress.cpp psapi)
         add_test(NAME AporiaGraphicsStress COMMAND AporiaGraphicsStress 4096 4)

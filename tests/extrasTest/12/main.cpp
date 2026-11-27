@@ -1,4 +1,4 @@
-﻿﻿﻿﻿// Aporia render test 12 — night alley lighting lab (SDL3 window).
+// Aporia render test 12 — night alley lighting lab (SDL3 window).
 //
 // A dim night alley: a ground strip, two walls and a row of lamp posts. Every
 // lamp carries a warm point light plus an emissive head, so the fixtures glow
@@ -111,7 +111,7 @@ bool headlessLightsCheck() {
     Aporia::CameraState camera;
     const Aporia::Vec3 eye{0.0, -5.0, 5.0};
     const Aporia::Mat4 view = Aporia::Mat4::lookAt(eye, {0.0, 0.0, 0.0}, {0.0, 0.0, 1.0});
-    const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(0.9, 1.0, 0.1, 100.0);
+    const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(0.9, 1.0, 0.1, 100.0);
     std::memcpy(camera.viewMatrix, &view, sizeof(view));
     std::memcpy(camera.projectionMatrix, &projection, sizeof(projection));
     camera.position[0] = eye.x;
@@ -366,7 +366,7 @@ int main(int argc, char** argv) {
         const Aporia::Vec3 target{0.0, camY + 12.0, 3.4};
         Aporia::CameraState camera;
         const Aporia::Mat4 view = Aporia::Mat4::lookAt(eye, target, {0.0, 0.0, 1.0});
-        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(
+        const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(
             0.85, static_cast<double>(kWindowWidth) / static_cast<double>(kWindowHeight), 0.1, 200.0);
         std::memcpy(camera.viewMatrix, &view, sizeof(view));
         std::memcpy(camera.projectionMatrix, &projection, sizeof(projection));

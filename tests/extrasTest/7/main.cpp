@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -77,7 +78,7 @@ Aporia::CameraState cameraFor(double aspect, double time) {
     const Aporia::Vec3 eye{8.0 * std::cos(time * 0.18), -10.0 * std::sin(time * 0.18), 6.5};
     const Aporia::Vec3 target{0.0, 0.0, 1.0};
     const Aporia::Mat4 view = Aporia::Mat4::lookAt(eye, target, {0.0, 0.0, 1.0});
-    const Aporia::Mat4 projection = Aporia::Mat4::perspectiveVulkan(1.0, aspect, 0.1, 200.0);
+    const Aporia::Mat4 projection = Aporia::Mat4::perspectiveD3D(1.0, aspect, 0.1, 200.0);
     Aporia::CameraState result;
     std::memcpy(result.viewMatrix, &view, sizeof(view));
     std::memcpy(result.projectionMatrix, &projection, sizeof(projection));
@@ -206,6 +207,20 @@ int main() {
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&previous);
     std::cout << "Render Test 7 running. ESC settings, 1/2/3 quality, U player ultra shadows.\n";
+    // Diagnostics
+    {
+        auto sc = localGraphics.shadowConfig();
+        std::cout << "[diag] shadowConfig: enabled=" << sc.enabled
+                  << " mapSize=" << sc.mapSize
+                  << " distance=" << sc.distance
+                  << " pcfRadius=" << sc.pcfRadius
+                  << " strength=" << sc.strength << "\n";
+        std::cout << "[diag] shadowDistance=" << localGraphics.shadowDistance() << "\n";
+        auto stats = localGraphics.stats();
+        std::cout << "[diag] shadowMapSize=" << stats.shadowMapSize
+                  << " quality=" << stats.quality
+                  << " hdrEnabled=" << stats.hdrEnabled << "\n";
+    }
 
     while (running) {
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -351,6 +366,10 @@ int main() {
                     {0.65f, 0.70f, 0.78f, 1.0f}, Aporia::UiLayer::Overlay);
         }
         localGraphics.setUiDrawList(std::move(ui));
+        // TEMP DIAG: isolate the shadow bug from the UI passes.
+        if (std::getenv("APORIA_T7_NOUI") != nullptr) {
+            localGraphics.clearUiDrawList();
+        }
 
         if (!localGraphics.render(camera, Aporia::EnvironmentState{}, items)) {
             std::cerr << "Render failed: " << localGraphics.lastError() << '\n';

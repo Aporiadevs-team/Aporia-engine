@@ -60,24 +60,30 @@ if(APORIA_ENABLE_INPUT)
 endif()
 
 if(APORIA_ENABLE_GRAPHICS)
-    include(Shaders)  # Vulkan + SPIR-V compile, AporiaVulkanShaders target
-    # Vulkan include dirs come automatically via Vulkan::Vulkan target link
-    # (see line 76 below). Do NOT add a separate target_include_directories
-    # for ${Vulkan_INCLUDE_DIRS} — it is undefined and causes build failures.
+    # The Direct3D renderer compiles its HLSL at runtime, so the source is
+    # embedded into the library as a string constant.
+    include(Hlsl)
+    target_include_directories(AporiaEngine PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_compile_definitions(AporiaEngine PUBLIC APORIA_ENGINE_HAS_GRAPHICS)
     target_compile_definitions(AporiaEngine PRIVATE
-        "APORIA_VULKAN_SHADER_DIR=\"${APORIA_VULKAN_SHADER_DIR}\"")
+        "APORIA_BACKEND_DEFAULT=\"${APORIA_BACKEND}\"")
     if(APORIA_EXPERIMENTAL)
         target_compile_definitions(AporiaEngine PUBLIC APORIA_EXPERIMENTAL=1)
     endif()
     if(APORIA_SEASONS)
         target_compile_definitions(AporiaEngine PUBLIC APORIA_SEASONS=1)
     endif()
-    target_link_libraries(AporiaEngine PRIVATE Vulkan::Vulkan)
     if(WIN32)
         target_link_libraries(AporiaEngine PRIVATE user32)
     endif()
-    add_dependencies(AporiaEngine AporiaVulkanShaders)
+endif()
+
+# ---------------------------------------------------------------------------
+# Direct3D backends
+# ---------------------------------------------------------------------------
+if(APORIA_ENABLE_D3D12)
+    target_compile_definitions(AporiaEngine PRIVATE APORIA_ENABLE_D3D12=1)
+    target_link_libraries(AporiaEngine PRIVATE d3d12 dxgi d3dcompiler)
 endif()
 
 # ---------------------------------------------------------------------------

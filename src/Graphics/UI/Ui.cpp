@@ -5,15 +5,17 @@
 namespace Aporia {
 
 void Graphics::setUiDrawList(UiDrawList drawList) {
-    if (impl_) {
-        impl_->uiDrawList = std::move(drawList);
+    if (!impl_ || !impl_->directX) {
+        return;
     }
+    impl_->directX->setUiDrawList(std::move(drawList));
 }
 
 void Graphics::clearUiDrawList() noexcept {
-    if (impl_) {
-        impl_->uiDrawList = {};
+    if (!impl_ || !impl_->directX) {
+        return;
     }
+    impl_->directX->clearUiDrawList();
 }
 
 } // namespace Aporia

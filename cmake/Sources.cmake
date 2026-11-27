@@ -6,10 +6,15 @@
 
 file(GLOB APORIA_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
+# Core holds the scene graph and the game facade.
+file(GLOB_RECURSE APORIA_CORE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Core/*.cpp")
+list(APPEND APORIA_SOURCES ${APORIA_CORE_SOURCES})
+
 if(APORIA_ENABLE_INPUT)
     # Win32 input source is always compiled.
     file(GLOB APORIA_INPUT_SOURCES CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/Platform/Win32/Input/*.cpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Input/Platform/Win32/Input/*.cpp")
     list(APPEND APORIA_SOURCES ${APORIA_INPUT_SOURCES})
 
     # SDL3 / GLFW input sources are NOT compiled in the main build — they
@@ -19,13 +24,13 @@ if(APORIA_ENABLE_INPUT)
 
     # if(APORIA_INPUT_SDL3)
     #     file(GLOB APORIA_INPUT_SDL3_SOURCES CONFIGURE_DEPENDS
-    #         "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/Platform/SDL3/Input/*.cpp")
+    #         "${CMAKE_CURRENT_SOURCE_DIR}/src/Input/Platform/SDL3/Input/*.cpp")
     #     list(APPEND APORIA_SOURCES ${APORIA_INPUT_SDL3_SOURCES})
     # endif()
 
     # if(APORIA_INPUT_GLFW)
     #     file(GLOB APORIA_INPUT_GLFW_SOURCES CONFIGURE_DEPENDS
-    #         "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/Platform/Glfw/Input/*.cpp")
+    #         "${CMAKE_CURRENT_SOURCE_DIR}/src/Input/Platform/Glfw/Input/*.cpp")
     #     list(APPEND APORIA_SOURCES ${APORIA_INPUT_GLFW_SOURCES})
     # endif()
 endif()
@@ -56,7 +61,25 @@ if(APORIA_ENABLE_GRAPHICS)
     list(REMOVE_ITEM APORIA_DEVICE_SUB ${APORIA_DEVICE_ROOT})
     list(APPEND APORIA_DEVICE_SUB ${APORIA_DEVICE_ROOT})
 
+    # The Direct3D backends are compiled through their own option below, so
+    # they must not be picked up by the device glob.
+    file(GLOB_RECURSE APORIA_DEVICE_DIRECTX CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/D3D12/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/D3D11/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/D3D9/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/Backend/*.cpp")
+    list(REMOVE_ITEM APORIA_DEVICE_SUB ${APORIA_DEVICE_DIRECTX})
+
     file(GLOB_RECURSE APORIA_GRAPHICS_SUB CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/Graphics/*.cpp")
     list(APPEND APORIA_SOURCES ${APORIA_DEVICE_SUB} ${APORIA_GRAPHICS_SUB})
+endif()
+
+# The Direct3D backends implement the abstract backend contract in
+# include/Aporia/Graphics/Backend.hpp.
+if(APORIA_ENABLE_D3D12)
+    file(GLOB_RECURSE APORIA_D3D12_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/D3D12/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Device/Backend/*.cpp")
+    list(APPEND APORIA_SOURCES ${APORIA_D3D12_SOURCES})
 endif()
