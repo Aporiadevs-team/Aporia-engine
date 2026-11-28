@@ -91,4 +91,22 @@ bool ImageRender::renderImage(
     return render(graphics, camera, mesh, modelMatrix16);
 }
 
+bool ImageRender::renderPng(
+        Aporia::Graphics& graphics,
+        const Aporia::CameraState& camera,
+        const std::string& pngPath,
+        Aporia::MeshHandle mesh,
+        const float modelMatrix16[16]) {
+    return renderImage(graphics, camera, pngPath, mesh, modelMatrix16);
+}
+
+bool ImageRender::renderJpeg(
+        Aporia::Graphics& graphics,
+        const Aporia::CameraState& camera,
+        const std::string& jpegPath,
+        Aporia::MeshHandle mesh,
+        const float modelMatrix16[16]) {
+    return renderImage(graphics, camera, jpegPath, mesh, modelMatrix16);
+}
+
 } // namespace Aporia::graphics_internal

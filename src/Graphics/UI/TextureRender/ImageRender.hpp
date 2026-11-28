@@ -63,6 +63,14 @@ public:
         Aporia::MeshHandle mesh,
         const float modelMatrix16[16]);
 
+    // Thin per-format convenience wrappers (load + render).
+    [[nodiscard]] bool renderPng(
+        Aporia::Graphics& graphics, const Aporia::CameraState& camera,
+        const std::string& pngPath, Aporia::MeshHandle mesh, const float modelMatrix16[16]);
+    [[nodiscard]] bool renderJpeg(
+        Aporia::Graphics& graphics, const Aporia::CameraState& camera,
+        const std::string& jpegPath, Aporia::MeshHandle mesh, const float modelMatrix16[16]);
+
     [[nodiscard]] bool loaded() const noexcept { return loaded_; }
     [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
     [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
